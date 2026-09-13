@@ -1,0 +1,194 @@
+{
+  "name": "Lead Intake with n8n Data Table",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "lead-intake-data-table",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [0, 0],
+      "id": "838652db-ab24-463a-b110-d71cb0c972a3",
+      "name": "Receive Lead",
+      "webhookId": "79c8dd0a-9cbf-4e67-b4c1-70fa790c3894"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const input = $json.body ?? {};\nconst headers = $json.headers ?? {};\n\nconst idempotencyKey = String(\n  headers['idempotency-key']\n  ?? headers['x-idempotency-key']\n  ?? input.idempotencyKey\n  ?? ''\n).trim();\n\nconst name = String(input.name ?? '').trim().slice(0, 200);\nconst email = String(input.email ?? '').trim().toLowerCase().slice(0, 320);\nconst company = String(input.company ?? '').trim().slice(0, 200);\nconst message = String(input.message ?? '').trim().slice(0, 5000);\nconst source = String(input.source ?? 'website').trim().slice(0, 100);\nconst errors = [];\n\nif (!idempotencyKey) errors.push('An Idempotency-Key header is required');\nif (idempotencyKey.length > 200) errors.push('The idempotency key must not exceed 200 characters');\nif (!email || !/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email)) errors.push('A valid email is required');\n\nconst normalizedPayload = JSON.stringify({ name, email, company, message, source });\n\nreturn { json: { valid: errors.length === 0, errors, idempotencyKey, name, email, company, message, source, normalizedPayload } };"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 0],
+      "id": "799bb720-6148-4a77-b222-0af0b87a44e8",
+      "name": "Validate and Normalize"
+    },
+    {
+      "parameters": {
+        "conditions": {"options": {"caseSensitive": true, "typeValidation": "strict", "version": 3}, "conditions": [{"id": "ff04166c-4572-4492-aed2-465d5cd27c91", "leftValue": "={{ $json.valid }}", "rightValue": "", "operator": {"type": "boolean", "operation": "true", "singleValue": true}}], "combinator": "and"},
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [440, 0],
+      "id": "79ed35c2-ffb5-49e9-84d5-d8b4acb9d79c",
+      "name": "Input Valid?"
+    },
+    {
+      "parameters": {"respondWith": "json", "responseBody": "={{ { accepted: false, errors: $json.errors } }}", "options": {"responseCode": 400}},
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [660, 180],
+      "id": "2201cb29-4edc-4b88-861e-ed547acab79c",
+      "name": "Reject Invalid Request"
+    },
+    {
+      "parameters": {"value": "={{ $json.normalizedPayload }}", "dataPropertyName": "payloadHash"},
+      "type": "n8n-nodes-base.crypto",
+      "typeVersion": 2,
+      "position": [660, -100],
+      "id": "62de48e0-8208-4f22-9d58-20153fa30a96",
+      "name": "Hash Normalized Payload"
+    },
+    {
+      "parameters": {
+        "resource": "table",
+        "operation": "create",
+        "tableName": "lead_intake_template",
+        "columns": {"column": [
+          {"name": "idempotency_key", "type": "string"},
+          {"name": "payload_hash", "type": "string"},
+          {"name": "name", "type": "string"},
+          {"name": "email", "type": "string"},
+          {"name": "company", "type": "string"},
+          {"name": "message", "type": "string"},
+          {"name": "source", "type": "string"},
+          {"name": "status", "type": "string"},
+          {"name": "attempt_count", "type": "number"},
+          {"name": "last_error", "type": "string"},
+          {"name": "received_at", "type": "date"},
+          {"name": "processed_at", "type": "date"}
+        ]},
+        "options": {"createIfNotExists": true}
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [880, -100],
+      "id": "d35896a1-dbf2-4d56-b314-ab311b48c626",
+      "name": "Create or Reuse Table"
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "get",
+        "dataTableId": {"__rl": true, "mode": "name", "value": "lead_intake_template"},
+        "matchType": "allConditions",
+        "filters": {"conditions": [{"keyName": "idempotency_key", "condition": "eq", "keyValue": "={{ $('Hash Normalized Payload').item.json.idempotencyKey }}"}]},
+        "returnAll": false,
+        "limit": 1
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [1100, -100],
+      "id": "1978d441-a843-46ab-b89f-a314642b5db2",
+      "name": "Find Existing Lead",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const incoming = $('Hash Normalized Payload').item.json;\nconst existing = $json ?? {};\nconst exists = existing.id !== undefined && existing.id !== null;\nconst conflict = exists && existing.payload_hash !== incoming.payloadHash;\nreturn { json: { ...incoming, exists, conflict, existingLeadId: exists ? existing.id : null } };"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1320, -100],
+      "id": "880a64cf-1b89-4bbc-963e-c69ce79d2012",
+      "name": "Classify Replay"
+    },
+    {
+      "parameters": {"conditions": {"options": {"caseSensitive": true, "typeValidation": "strict", "version": 3}, "conditions": [{"id": "df0af4d6-d6e4-45f0-96ec-5217e6aab6ae", "leftValue": "={{ $json.conflict }}", "rightValue": "", "operator": {"type": "boolean", "operation": "true", "singleValue": true}}], "combinator": "and"}, "options": {}},
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [1540, -100],
+      "id": "83fd1a63-88ab-45b8-8cd9-d0ffde9deecd",
+      "name": "Replay Conflict?"
+    },
+    {
+      "parameters": {"respondWith": "json", "responseBody": "={{ { accepted: false, error: 'IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD' } }}", "options": {"responseCode": 409}},
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [1760, -220],
+      "id": "1e064268-a546-49ae-a1a4-5ca895467741",
+      "name": "Reject Replay Conflict"
+    },
+    {
+      "parameters": {"conditions": {"options": {"caseSensitive": true, "typeValidation": "strict", "version": 3}, "conditions": [{"id": "ebfe0ffc-623a-47a6-985c-e4c91d4655e2", "leftValue": "={{ $json.exists }}", "rightValue": "", "operator": {"type": "boolean", "operation": "true", "singleValue": true}}], "combinator": "and"}, "options": {}},
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [1760, -40],
+      "id": "c4135d58-fae1-4ea3-bcea-311cf8ca6cdf",
+      "name": "Already Exists?"
+    },
+    {
+      "parameters": {"respondWith": "json", "responseBody": "={{ { accepted: true, duplicate: true, leadId: $json.existingLeadId } }}", "options": {"responseCode": 200}},
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [1980, -100],
+      "id": "809969f7-a5e4-4725-8ea0-5863f70aac68",
+      "name": "Return Existing Lead"
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "insert",
+        "dataTableId": {"__rl": true, "mode": "name", "value": "lead_intake_template"},
+        "columns": {"mappingMode": "defineBelow", "value": {
+          "idempotency_key": "={{ $json.idempotencyKey }}",
+          "payload_hash": "={{ $json.payloadHash }}",
+          "name": "={{ $json.name }}",
+          "email": "={{ $json.email }}",
+          "company": "={{ $json.company }}",
+          "message": "={{ $json.message }}",
+          "source": "={{ $json.source }}",
+          "status": "pending",
+          "attempt_count": 0,
+          "last_error": "",
+          "received_at": "={{ $now.toISO() }}"
+        }},
+        "options": {}
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [1980, 60],
+      "id": "1f8933b0-6fb8-4354-9d8c-33128393e9da",
+      "name": "Insert New Lead"
+    },
+    {
+      "parameters": {"respondWith": "json", "responseBody": "={{ { accepted: true, duplicate: false, leadId: $json.id } }}", "options": {"responseCode": 202}},
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [2200, 60],
+      "id": "4ac7fcb8-49e2-4a72-b016-57ab0f850383",
+      "name": "Return New Lead"
+    }
+  ],
+  "connections": {
+    "Receive Lead": {"main": [[{"node": "Validate and Normalize", "type": "main", "index": 0}]]},
+    "Validate and Normalize": {"main": [[{"node": "Input Valid?", "type": "main", "index": 0}]]},
+    "Input Valid?": {"main": [[{"node": "Hash Normalized Payload", "type": "main", "index": 0}], [{"node": "Reject Invalid Request", "type": "main", "index": 0}]]},
+    "Hash Normalized Payload": {"main": [[{"node": "Create or Reuse Table", "type": "main", "index": 0}]]},
+    "Create or Reuse Table": {"main": [[{"node": "Find Existing Lead", "type": "main", "index": 0}]]},
+    "Find Existing Lead": {"main": [[{"node": "Classify Replay", "type": "main", "index": 0}]]},
+    "Classify Replay": {"main": [[{"node": "Replay Conflict?", "type": "main", "index": 0}]]},
+    "Replay Conflict?": {"main": [[{"node": "Reject Replay Conflict", "type": "main", "index": 0}], [{"node": "Already Exists?", "type": "main", "index": 0}]]},
+    "Already Exists?": {"main": [[{"node": "Return Existing Lead", "type": "main", "index": 0}], [{"node": "Insert New Lead", "type": "main", "index": 0}]]},
+    "Insert New Lead": {"main": [[{"node": "Return New Lead", "type": "main", "index": 0}]]}
+  },
+  "pinData": {},
+  "active": false,
+  "settings": {"executionOrder": "v1"},
+  "meta": {"templateCredsSetupCompleted": true}
+}
