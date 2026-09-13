@@ -19,8 +19,7 @@
       },
       {
         "parameters": {
-          "jsCode": "const input = $json.body ?? $json;\nconst email = String(input.email ?? '').trim().toLowerCase();\n\nif (!email || !/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email)) {\n  throw new
-          Error('A valid email is required');\n}\n\nreturn [{\n  json: {\n    leadId: input.id ?? $execution.id,\n    name: String(input.name ?? '').trim(),\n    email,\n    company:
+          "jsCode": "const input = $json.body ?? $json;\nconst email = String(input.email ?? '').trim().toLowerCase();\n\nif (!email || !/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email)) {\n  throw new Error('A valid email is required');\n}\n\nreturn [{\n  json: {\n    leadId: input.id ?? $execution.id,\n    name: String(input.name ?? '').trim(),\n    email,\n    company:
           String(input.company ?? '').trim(),\n    message: String(input.message ?? '').trim(),\n    source: String(input.source ?? 'website').trim(),\n    receivedAt: new Date().toISOString()\n  }\n}];"
         },
         "id": "6925a70e-806b-46e1-ab66-fbf7bea35320",
