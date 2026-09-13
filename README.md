@@ -7,6 +7,7 @@
   ## Planned templates
 
   - [Webhook lead intake and validation](templates/lead-intake/)
+  - [Lead intake with validation, idempotency, and Data Table storage](templates/lead-intake-data-table/)
   - CRM to ERP customer synchronization
   - Automated invoice follow-ups
   - WhatsApp customer notifications
