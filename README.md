@@ -6,7 +6,7 @@
 
   ## Planned templates
 
-  - CRM lead intake and qualification
+  - [Webhook lead intake and validation](templates/lead-intake/)
   - CRM to ERP customer synchronization
   - Automated invoice follow-ups
   - WhatsApp customer notifications
