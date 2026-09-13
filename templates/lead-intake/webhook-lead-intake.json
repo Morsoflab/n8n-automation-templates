@@ -1,0 +1,85 @@
+{
+    "name": "Webhook Lead Intake Starter",
+    "nodes": [
+      {
+        "parameters": {
+          "httpMethod": "POST",
+          "path": "lead-intake-template",
+          "responseMode": "responseNode",
+          "options": {}
+        },
+        "id": "967c61fd-49eb-4e76-86e5-362066981701",
+        "name": "Receive Lead",
+        "type": "n8n-nodes-base.webhook",
+        "typeVersion": 2,
+        "position": [
+          0,
+          0
+        ]
+      },
+      {
+        "parameters": {
+          "jsCode": "const input = $json.body ?? $json;\nconst email = String(input.email ?? '').trim().toLowerCase();\n\nif (!email || !/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email)) {\n  throw new
+          Error('A valid email is required');\n}\n\nreturn [{\n  json: {\n    leadId: input.id ?? $execution.id,\n    name: String(input.name ?? '').trim(),\n    email,\n    company:
+          String(input.company ?? '').trim(),\n    message: String(input.message ?? '').trim(),\n    source: String(input.source ?? 'website').trim(),\n    receivedAt: new Date().toISOString()\n  }\n}];"
+        },
+        "id": "6925a70e-806b-46e1-ab66-fbf7bea35320",
+        "name": "Validate and Normalize",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          240,
+          0
+        ]
+      },
+      {
+        "parameters": {
+          "respondWith": "json",
+          "responseBody": "={{ { \"accepted\": true, \"leadId\": $json.leadId } }}",
+          "options": {}
+        },
+        "id": "d7d85e03-1aab-4201-b6bc-78dbdbeb88e3",
+        "name": "Return Accepted",
+        "type": "n8n-nodes-base.respondToWebhook",
+        "typeVersion": 1.4,
+        "position": [
+          480,
+          0
+        ]
+      }
+    ],
+    "pinData": {},
+    "connections": {
+      "Receive Lead": {
+        "main": [
+          [
+            {
+              "node": "Validate and Normalize",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Validate and Normalize": {
+        "main": [
+          [
+            {
+              "node": "Return Accepted",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    },
+    "active": false,
+    "settings": {
+      "executionOrder": "v1"
+    },
+    "versionId": "f810cd40-393e-40dd-96b3-42bd5722ed0b",
+    "meta": {
+      "templateCredsSetupCompleted": true
+    },
+    "tags": []
+  }
