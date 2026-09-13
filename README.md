@@ -4,8 +4,8 @@
 
   These templates are designed as practical starting points. Review authentication, permissions, error handling, retries, logging, and data-retention requirements before using them in production.
 
-  ## Planned templates
-
+  ## Available templates
+  
   - [Webhook lead intake and validation](templates/lead-intake/)
   - [Lead intake with validation, idempotency, and Data Table storage](templates/lead-intake-data-table/)
   - CRM to ERP customer synchronization
