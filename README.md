@@ -4,6 +4,10 @@
 
   These templates are designed as practical starting points. Review authentication, permissions, error handling, retries, logging, and data-retention requirements before using them in production.
 
+  ## Official n8n template
+
+  - [Deduplicate inbound leads from a webhook with a Data Table](https://n8n.io/workflows/19526-deduplicate-inbound-leads-from-a-webhook-with-a-data-table/)
+
   ## Available templates
   
   - [Webhook lead intake and validation](templates/lead-intake/)
