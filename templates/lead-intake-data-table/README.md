@@ -91,14 +91,16 @@
 
   ## Verified test results
 
-  The workflow was imported and tested on n8n with all four paths:
+  The updated workflow was imported and tested in n8n on 2026-09-15:
 
-  - New request: HTTP 202
-  - Exact duplicate: HTTP 200
-  - Conflicting replay: HTTP 409
-  - Invalid request: HTTP 400
-
-  The results above apply to the original request-level idempotency paths. After importing this revision, run the manual checks below before activating it.
+  - New request: HTTP 202; created lead 3 with `status=pending`.
+  - Exact replay: HTTP 200; returned lead 3 without inserting a new row.
+  - Same key with changed payload: HTTP 409.
+  - Same normalized email with a new key: HTTP 202; created lead 4 with `status=manual_review`, `possible_duplicate_of=3`, and `duplicate_signals=email,phone,name,company`.
+  - Same normalized phone with a different email and key: HTTP 202; created lead 5 with `status=manual_review`, `possible_duplicate_of=3`, and `duplicate_signals=phone,name,company`.
+  - Different contact details: HTTP 202; created lead 6 with `status=pending` and empty duplicate fields.
+  - Missing phone: HTTP 202; created lead 7 with `status=pending` and no false phone match.
+  - Invalid request: HTTP 400 with both expected validation errors.
 
   ## Manual test requests
 
