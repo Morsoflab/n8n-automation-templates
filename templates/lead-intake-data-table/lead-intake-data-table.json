@@ -12,13 +12,12 @@
       "typeVersion": 2.1,
       "position": [0, 0],
       "id": "838652db-ab24-463a-b110-d71cb0c972a3",
-      "name": "Receive Lead",
-      "webhookId": "79c8dd0a-9cbf-4e67-b4c1-70fa790c3894"
+      "name": "Receive Lead"
     },
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "const input = $json.body ?? {};\nconst headers = $json.headers ?? {};\n\nconst idempotencyKey = String(\n  headers['idempotency-key']\n  ?? headers['x-idempotency-key']\n  ?? input.idempotencyKey\n  ?? ''\n).trim();\n\nconst name = String(input.name ?? '').trim().slice(0, 200);\nconst email = String(input.email ?? '').trim().toLowerCase().slice(0, 320);\nconst company = String(input.company ?? '').trim().slice(0, 200);\nconst message = String(input.message ?? '').trim().slice(0, 5000);\nconst source = String(input.source ?? 'website').trim().slice(0, 100);\nconst errors = [];\n\nif (!idempotencyKey) errors.push('An Idempotency-Key header is required');\nif (idempotencyKey.length > 200) errors.push('The idempotency key must not exceed 200 characters');\nif (!email || !/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email)) errors.push('A valid email is required');\n\nconst normalizedPayload = JSON.stringify({ name, email, company, message, source });\n\nreturn { json: { valid: errors.length === 0, errors, idempotencyKey, name, email, company, message, source, normalizedPayload } };"
+        "jsCode": "const input = $json.body ?? {};\nconst headers = $json.headers ?? {};\n\nconst idempotencyKey = String(\n  headers['idempotency-key']\n  ?? headers['x-idempotency-key']\n  ?? input.idempotencyKey\n  ?? ''\n).trim();\n\nconst name = String(input.name ?? '').trim().slice(0, 200);\nconst email = String(input.email ?? '').trim().toLowerCase().slice(0, 320);\nconst rawPhone = String(input.phone ?? '').trim();\nconst phoneDigits = rawPhone.replace(/\\D/g, '');\nconst phone = (phoneDigits.startsWith('00') ? phoneDigits.slice(2) : phoneDigits).slice(0, 30);\nconst company = String(input.company ?? '').trim().slice(0, 200);\nconst message = String(input.message ?? '').trim().slice(0, 5000);\nconst source = String(input.source ?? 'website').trim().slice(0, 100);\nconst errors = [];\n\nif (!idempotencyKey) errors.push('An Idempotency-Key header is required');\nif (idempotencyKey.length > 200) errors.push('The idempotency key must not exceed 200 characters');\nif (!email || !/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email)) errors.push('A valid email is required');\n\nconst payloadForHash = { name, email, company, message, source };\nif (phone) payloadForHash.phone = phone;\nconst normalizedPayload = JSON.stringify(payloadForHash);\n\nreturn { json: { valid: errors.length === 0, errors, idempotencyKey, name, email, phone, company, message, source, normalizedPayload } };"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -63,10 +62,13 @@
           {"name": "payload_hash", "type": "string"},
           {"name": "name", "type": "string"},
           {"name": "email", "type": "string"},
+          {"name": "phone", "type": "string"},
           {"name": "company", "type": "string"},
           {"name": "message", "type": "string"},
           {"name": "source", "type": "string"},
           {"name": "status", "type": "string"},
+          {"name": "possible_duplicate_of", "type": "string"},
+          {"name": "duplicate_signals", "type": "string"},
           {"name": "attempt_count", "type": "number"},
           {"name": "last_error", "type": "string"},
           {"name": "received_at", "type": "date"},
@@ -143,6 +145,31 @@
     {
       "parameters": {
         "resource": "row",
+        "operation": "get",
+        "dataTableId": {"__rl": true, "mode": "name", "value": "lead_intake_template"},
+        "returnAll": true
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [1980, 60],
+      "id": "ac310d5b-3778-44f1-bf3d-8083fae3b196",
+      "name": "Find Possible Duplicate",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const incoming = $('Classify Replay').first().json;\nconst normalizeText = value => String(value ?? '').trim().toLowerCase().replace(/\\s+/g, ' ');\n// ponytail: scans the table once; move identity controls into the database when volume or concurrency requires it.\nconst possibleMatch = $input.all()\n  .map(item => item.json)\n  .filter(row => row.id !== undefined && row.id !== null)\n  .find(row => row.email === incoming.email || (incoming.phone && row.phone === incoming.phone));\nconst duplicateSignals = [];\n\nif (possibleMatch?.email === incoming.email) duplicateSignals.push('email');\nif (incoming.phone && possibleMatch?.phone === incoming.phone) duplicateSignals.push('phone');\nif (possibleMatch && incoming.name && normalizeText(possibleMatch.name) === normalizeText(incoming.name)) duplicateSignals.push('name');\nif (possibleMatch && incoming.company && normalizeText(possibleMatch.company) === normalizeText(incoming.company)) duplicateSignals.push('company');\n\nreturn [{ json: {\n  ...incoming,\n  possibleDuplicateOf: possibleMatch ? String(possibleMatch.id) : '',\n  duplicateSignals: duplicateSignals.join(','),\n  status: possibleMatch ? 'manual_review' : 'pending',\n} }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2200, 60],
+      "id": "7a9d04f9-9e3e-42d5-a194-0e93a51ee8c5",
+      "name": "Classify Possible Duplicate"
+    },
+    {
+      "parameters": {
+        "resource": "row",
         "operation": "insert",
         "dataTableId": {"__rl": true, "mode": "name", "value": "lead_intake_template"},
         "columns": {"mappingMode": "defineBelow", "value": {
@@ -150,10 +177,13 @@
           "payload_hash": "={{ $json.payloadHash }}",
           "name": "={{ $json.name }}",
           "email": "={{ $json.email }}",
+          "phone": "={{ $json.phone }}",
           "company": "={{ $json.company }}",
           "message": "={{ $json.message }}",
           "source": "={{ $json.source }}",
-          "status": "pending",
+          "status": "={{ $json.status }}",
+          "possible_duplicate_of": "={{ $json.possibleDuplicateOf }}",
+          "duplicate_signals": "={{ $json.duplicateSignals }}",
           "attempt_count": 0,
           "last_error": "",
           "received_at": "={{ $now.toISO() }}"
@@ -162,7 +192,7 @@
       },
       "type": "n8n-nodes-base.dataTable",
       "typeVersion": 1.1,
-      "position": [1980, 60],
+      "position": [2420, 60],
       "id": "1f8933b0-6fb8-4354-9d8c-33128393e9da",
       "name": "Insert New Lead"
     },
@@ -170,9 +200,61 @@
       "parameters": {"respondWith": "json", "responseBody": "={{ { accepted: true, duplicate: false, leadId: $json.id } }}", "options": {"responseCode": 202}},
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.5,
-      "position": [2200, 60],
+      "position": [2640, 60],
       "id": "4ac7fcb8-49e2-4a72-b016-57ab0f850383",
       "name": "Return New Lead"
+    },
+    {
+      "parameters": {
+        "content": "# Lead intake with layered duplicate checks\n\nThis workflow accepts lead submissions, validates required input, and stores valid requests in an n8n Data Table. Request-level idempotency remains authoritative: the same key and payload returns the existing lead, while reuse with a changed payload returns a conflict.\n\nFor a new idempotency key, the workflow also looks for the same normalized email or non-empty normalized phone. It always inserts the submission. A likely person-level duplicate receives `manual_review`, a possible matching row ID, and the signals that matched. Name and company only add context after an email or phone match.\n\n### How it works\n\nThe workflow normalizes business fields, hashes only that normalized payload, checks the idempotency key, then scans stored leads for contact matches before inserting. Responses stay 202, 200, 409, or 400.\n\n### Setup\n\nImport the workflow and use the test webhook first. Fresh imports create `lead_intake_template`. For an existing table, add the three columns listed in the README before testing. Review authentication and database-level controls before production use.",
+        "height": 300,
+        "width": 760,
+        "color": 1
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-40, -560],
+      "id": "3cda7139-4c47-4819-bcbc-019a885ddb92",
+      "name": "Workflow Overview"
+    },
+    {
+      "parameters": {
+        "content": "## Validate the request\n\nRead the webhook, normalize submitted fields, reject invalid input, and hash only the business payload.",
+        "height": 400,
+        "width": 800,
+        "color": 7
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-40, -180],
+      "id": "414b47c3-9486-42df-86d7-486539cb6f61",
+      "name": "Validation Section"
+    },
+    {
+      "parameters": {
+        "content": "## Enforce request idempotency\n\nCreate or reuse the table, then return the existing lead or reject a conflicting replay.",
+        "height": 500,
+        "width": 1060,
+        "color": 7
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [820, -320],
+      "id": "85e09b8e-fd51-4ca7-a644-67427152d5ca",
+      "name": "Idempotency Section"
+    },
+    {
+      "parameters": {
+        "content": "## Flag possible people duplicates\n\nCompare normalized contact details, attach review signals, and insert every new submission without merging it.",
+        "height": 320,
+        "width": 800,
+        "color": 7
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [1920, -40],
+      "id": "8ee02455-532d-41db-ad94-ae5af9f49ace",
+      "name": "Duplicate Review Section"
     }
   ],
   "connections": {
@@ -184,11 +266,12 @@
     "Find Existing Lead": {"main": [[{"node": "Classify Replay", "type": "main", "index": 0}]]},
     "Classify Replay": {"main": [[{"node": "Replay Conflict?", "type": "main", "index": 0}]]},
     "Replay Conflict?": {"main": [[{"node": "Reject Replay Conflict", "type": "main", "index": 0}], [{"node": "Already Exists?", "type": "main", "index": 0}]]},
-    "Already Exists?": {"main": [[{"node": "Return Existing Lead", "type": "main", "index": 0}], [{"node": "Insert New Lead", "type": "main", "index": 0}]]},
+    "Already Exists?": {"main": [[{"node": "Return Existing Lead", "type": "main", "index": 0}], [{"node": "Find Possible Duplicate", "type": "main", "index": 0}]]},
+    "Find Possible Duplicate": {"main": [[{"node": "Classify Possible Duplicate", "type": "main", "index": 0}]]},
+    "Classify Possible Duplicate": {"main": [[{"node": "Insert New Lead", "type": "main", "index": 0}]]},
     "Insert New Lead": {"main": [[{"node": "Return New Lead", "type": "main", "index": 0}]]}
   },
   "pinData": {},
   "active": false,
-  "settings": {"executionOrder": "v1"},
-  "meta": {"templateCredsSetupCompleted": true}
+  "settings": {"executionOrder": "v1"}
 }
