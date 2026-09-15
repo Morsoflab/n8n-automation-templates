@@ -1,163 +1,171 @@
- # Lead Intake with n8n Data Table
+# Lead Intake with n8n Data Tables
 
-  A credential-free lead-intake workflow that uses n8n’s built-in Data Tables for validation, request idempotency, possible duplicate review, conflict handling, and durable storage.
+A credential-free lead-intake workflow with validation, expiring request-idempotency keys, possible duplicate review, conflict handling, and durable lead storage.
 
-  ## What it does
+## What it does
 
-  1. Receives lead data through an HTTP POST webhook.
-  2. Requires an `Idempotency-Key` header.
-  3. Validates the request and normalizes email and optional phone fields.
-  4. Creates a SHA-256 hash of the normalized payload.
-  5. Creates or reuses the `lead_intake_template` Data Table.
-  6. Checks whether the idempotency key already exists.
-  7. For a new key, checks existing rows for the same normalized email or the same non-empty normalized phone.
-  8. Stores every new submission. Likely person-level duplicates use `manual_review`; other leads use `pending`.
-  9. Records the possible matching row and its email, phone, name, and company signals without merging or rejecting the submission.
-  10. Returns the existing responses for new, duplicate, conflicting, and invalid requests.
+1. Receives lead data through an HTTP POST webhook.
+2. Requires an `Idempotency-Key` header.
+3. Validates the request and normalizes email and optional phone fields.
+4. Hashes only the normalized business payload.
+5. Stores leads in `lead_intake_template` and request keys in `lead_intake_idempotency`.
+6. Treats a key as active for 24 hours by default.
+7. Returns the original lead for an active key with the same payload, or HTTP 409 if its payload changed.
+8. Treats an expired key as new and still runs possible duplicate review.
+9. Removes at most 100 expired key records each hour without deleting or changing leads.
 
-  ## Import
+Request idempotency protects retries for a limited time. Lead retention controls how long submitted lead data remains available. Expiring or deleting a key record has no effect on its lead row.
 
-  1. Download `lead-intake-data-table.json`.
-  2. Import it into n8n.
-  3. Keep the workflow inactive during testing.
-  4. Click **Execute workflow** to enable the test webhook.
-  5. Copy the test URL from the **Receive Lead** node.
+## Import and configuration
 
-  The workflow creates the required Data Table automatically during the first valid request.
+1. Download `lead-intake-data-table.json`.
+2. Import it into n8n and leave it inactive.
+3. In **Validate and Normalize**, change `IDEMPOTENCY_TTL_HOURS` if the default 24-hour lifetime is not suitable.
+4. Adjust the 100-row limit in **Find Expired Keys** or the hourly **Cleanup Schedule** only if needed.
+5. Complete the migration below for an existing v0.3 import.
+6. Test every path before activation.
 
-  Existing imports need three string columns added to `lead_intake_template` before the updated workflow runs: `phone`, `possible_duplicate_of`, and `duplicate_signals`. Existing rows can leave them empty. Fresh imports create all three columns automatically.
+Fresh imports create these tables on first use:
 
-  ## Example request
+### `lead_intake_template`
 
-  ```bash
-  curl -i -X POST \
-    "YOUR_TEST_WEBHOOK_URL" \
-    -H "Content-Type: application/json" \
-    -H "Idempotency-Key: example-lead-001" \
-    -d '{
-      "name": "Example Lead",
-      "email": "lead@example.com",
-      "phone": "+49 30 1234 5678",
-      "company": "Example Company",
-      "message": "We need help connecting our CRM and ERP.",
-      "source": "website"
-    }'
-  ```
+| Column | Type |
+| --- | --- |
+| `name` | string |
+| `email` | string |
+| `phone` | string |
+| `company` | string |
+| `message` | string |
+| `source` | string |
+| `status` | string |
+| `possible_duplicate_of` | string |
+| `duplicate_signals` | string |
+| `attempt_count` | number |
+| `last_error` | string |
+| `received_at` | date |
+| `processed_at` | date |
 
-  ## Responses
+### `lead_intake_idempotency`
 
-  New lead:
+| Column | Type |
+| --- | --- |
+| `idempotency_key` | string |
+| `payload_hash` | string |
+| `lead_id` | number |
+| `created_at` | date |
+| `expires_at` | date |
 
-  ```json
-  {
-    "accepted": true,
-    "duplicate": false,
-    "leadId": 1
-  }
-  ```
+## Migrating an existing v0.3 import
 
-  Email comparison is case-insensitive after trimming whitespace. Phone comparison removes non-digits and treats an international `00` prefix like `+`; it does not infer a country code.
+Keep `lead_intake_template` and all its rows. The workflow no longer reads or writes its legacy `idempotency_key` and `payload_hash` columns, but they can remain in place.
 
-  Exact duplicate:
+Create `lead_intake_idempotency` with the five columns above before accepting requests. To preserve the remaining replay window for existing v0.3 rows, copy each still-active key into the new table:
 
-  ```json
-  {
-    "accepted": true,
-    "duplicate": true,
-    "leadId": 1
-  }
-  ```
+- `idempotency_key` from the lead row
+- `payload_hash` from the lead row
+- `lead_id` from the lead row `id`
+- `created_at` from `received_at`
+- `expires_at` equal to `received_at` plus the configured lifetime
 
-  Conflicting reuse of the same idempotency key:
+Skip rows whose calculated expiry is already past. If no old keys are copied, existing leads remain intact, but their old keys are treated as expired immediately.
 
-  ```json
-  {
-    "accepted": false,
-    "error": "IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD"
-  }
-  ```
+## Example request
 
-  Invalid request:
+```bash
+curl -i -X POST \
+  "$URL" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: example-lead-001" \
+  -d '{
+    "name": "Example Lead",
+    "email": "lead@example.com",
+    "phone": "+49 30 1234 5678",
+    "company": "Example Company",
+    "message": "We need help connecting our CRM and ERP.",
+    "source": "website"
+  }'
+```
 
-  ```json
-  {
-    "accepted": false,
-    "errors": [
-      "An Idempotency-Key header is required",
-      "A valid email is required"
-    ]
-  }
-  ```
+Email comparison is case-insensitive after trimming whitespace. Phone comparison removes non-digits and treats an international `00` prefix like `+`; it does not infer a country code. Timestamps and request metadata remain outside the payload hash.
 
-  ## Verified test results
+## Responses
 
-  The updated workflow was imported and tested in n8n on 2026-09-15:
+New lead, HTTP 202:
 
-  - New request: HTTP 202; created lead 3 with `status=pending`.
-  - Exact replay: HTTP 200; returned lead 3 without inserting a new row.
-  - Same key with changed payload: HTTP 409.
-  - Same normalized email with a new key: HTTP 202; created lead 4 with `status=manual_review`, `possible_duplicate_of=3`, and `duplicate_signals=email,phone,name,company`.
-  - Same normalized phone with a different email and key: HTTP 202; created lead 5 with `status=manual_review`, `possible_duplicate_of=3`, and `duplicate_signals=phone,name,company`.
-  - Different contact details: HTTP 202; created lead 6 with `status=pending` and empty duplicate fields.
-  - Missing phone: HTTP 202; created lead 7 with `status=pending` and no false phone match.
-  - Invalid request: HTTP 400 with both expected validation errors.
+```json
+{"accepted":true,"duplicate":false,"leadId":1}
+```
 
-  ## Manual test requests
+Active-key replay, HTTP 200:
 
-  Set `URL` to the test webhook URL, clear the `lead_intake_template` rows, then run these requests in order. Replace `URL` in each command with the test URL if your shell does not define it.
+```json
+{"accepted":true,"duplicate":true,"leadId":1}
+```
 
-  1. New request, then same payload and idempotency key. The first call returns HTTP 202 and inserts one `pending` row. Repeating it returns HTTP 200 with the same `leadId` and inserts nothing.
+Active-key conflict, HTTP 409:
 
-     ```bash
-     curl -i -X POST "$URL" -H "Content-Type: application/json" -H "Idempotency-Key: test-001" -d '{"name":"Ada Lovelace","email":" Ada@Example.com ","phone":"+49 30 1234 5678","company":"Analytical Engines","message":"First enquiry","source":"test"}'
-     ```
+```json
+{"accepted":false,"error":"IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD"}
+```
 
-  2. Changed payload and the same idempotency key. Change only the message; the response is HTTP 409 and no row is inserted.
+Invalid request, HTTP 400:
 
-     ```bash
-     curl -i -X POST "$URL" -H "Content-Type: application/json" -H "Idempotency-Key: test-001" -d '{"name":"Ada Lovelace","email":"ada@example.com","phone":"0049 (30) 1234-5678","company":"Analytical Engines","message":"Changed enquiry","source":"test"}'
-     ```
+```json
+{
+  "accepted": false,
+  "errors": [
+    "An Idempotency-Key header is required",
+    "A valid email is required"
+  ]
+}
+```
 
-  3. Same normalized email and a different idempotency key. The response is HTTP 202. A new row is inserted with `status=manual_review`, the first row ID in `possible_duplicate_of`, and `email,phone,name,company` in `duplicate_signals`.
+## Manual n8n test sequence
 
-     ```bash
-     curl -i -X POST "$URL" -H "Content-Type: application/json" -H "Idempotency-Key: test-002" -d '{"name":"Ada Lovelace","email":"ADA@example.com","phone":"0049 30 1234 5678","company":"Analytical Engines","message":"Second enquiry","source":"test"}'
-     ```
+Keep the workflow inactive. Clear both test tables, click **Execute workflow**, copy the test webhook URL from **Receive Lead**, and set it as `URL` in your shell.
 
-  4. Same normalized phone with a different email and idempotency key. The response is HTTP 202. The new row uses `manual_review`; `duplicate_signals` contains `phone` plus matching supporting fields.
+1. Submit a new request. Confirm HTTP 202, one `pending` lead row, and one key row whose `lead_id` points to it.
 
-     ```bash
-     curl -i -X POST "$URL" -H "Content-Type: application/json" -H "Idempotency-Key: test-003" -d '{"name":"Ada Lovelace","email":"ada@other.example","phone":"+49 (30) 1234-5678","company":"Analytical Engines","message":"Alternate email","source":"test"}'
-     ```
+   ```bash
+   curl -i -X POST "$URL" -H "Content-Type: application/json" -H "Idempotency-Key: expiry-001" -d '{"name":"Ada Lovelace","email":" Ada@Example.com ","phone":"+49 30 1234 5678","company":"Analytical Engines","message":"First enquiry","source":"test"}'
+   ```
 
-  5. Different person with no matching contact details. The response is HTTP 202 and the new row remains `pending` with empty duplicate fields.
+2. Repeat the same command before the key expires. Confirm HTTP 200 with the original lead ID and no new row in either table.
 
-     ```bash
-     curl -i -X POST "$URL" -H "Content-Type: application/json" -H "Idempotency-Key: test-004" -d '{"name":"Grace Hopper","email":"grace@example.net","phone":"+1 202 555 0147","company":"Compiler Co","message":"New enquiry","source":"test"}'
-     ```
+3. Reuse the active key with a changed message. Confirm HTTP 409 and no new row.
 
-  6. Missing optional phone. The response is HTTP 202 and an empty phone does not match another empty phone. This row remains `pending` because its email is new.
+   ```bash
+   curl -i -X POST "$URL" -H "Content-Type: application/json" -H "Idempotency-Key: expiry-001" -d '{"name":"Ada Lovelace","email":"ada@example.com","phone":"0049 (30) 1234-5678","company":"Analytical Engines","message":"Changed enquiry","source":"test"}'
+   ```
 
-     ```bash
-     curl -i -X POST "$URL" -H "Content-Type: application/json" -H "Idempotency-Key: test-005" -d '{"name":"Katherine Johnson","email":"katherine@example.org","company":"Orbital Co","message":"No phone supplied","source":"test"}'
-     ```
+4. Use a new key with the same normalized email and phone. Confirm HTTP 202 and a separate lead with `status=manual_review`, the first lead ID in `possible_duplicate_of`, and `email,phone,name,company` in `duplicate_signals`.
 
-  Re-run an invalid request, such as an empty object with no idempotency header, and confirm HTTP 400 before activation.
+   ```bash
+   curl -i -X POST "$URL" -H "Content-Type: application/json" -H "Idempotency-Key: expiry-002" -d '{"name":"Ada Lovelace","email":"ADA@example.com","phone":"0049 30 1234 5678","company":"Analytical Engines","message":"Second enquiry","source":"test"}'
+   ```
 
-  ## Production limitations
+5. Submit a different person without a phone. Confirm HTTP 202, `status=pending`, and no false phone match.
 
-  Person-level duplicate detection is probabilistic. Email or phone matches trigger review; name and company are recorded only as supporting signals and never establish identity by themselves.
+   ```bash
+   curl -i -X POST "$URL" -H "Content-Type: application/json" -H "Idempotency-Key: expiry-003" -d '{"name":"Katherine Johnson","email":"katherine@example.org","company":"Orbital Co","message":"No phone supplied","source":"test"}'
+   ```
 
-  The lookups and insertion are separate operations. Under concurrent requests, n8n Data Tables do not provide database-level uniqueness or atomic identity controls.
+6. In `lead_intake_idempotency`, change the `expires_at` value for `expiry-001` to a timestamp in the past. Repeat the request from step 1. Confirm HTTP 202 with a new lead ID. Because the contact details still match, the new lead must use `manual_review`; the expired key no longer controls replay detection.
 
-  Use this version for demonstrations, prototypes, and low-concurrency intake. High-concurrency or business-critical systems should enforce idempotency and duplicate-review controls at the database level, such as in the PostgreSQL version.
+7. Record the lead IDs, run the cleanup path from **Cleanup Schedule**, and confirm the expired key row is deleted while every lead row and value remains unchanged. The cleanup reads at most 100 expired rows per run.
 
-  Before production use, also add:
+8. Send an empty request without an idempotency header. Confirm HTTP 400 with both validation errors.
 
-  - Webhook authentication
-  - Rate limiting
-  - Downstream delivery processing
-  - Bounded retries
-  - Failure monitoring
-  - Manual review for terminal failures
-  - Data retention and deletion rules
+   ```bash
+   curl -i -X POST "$URL" -H "Content-Type: application/json" -d '{}'
+   ```
+
+## Production limitations
+
+Person-level duplicate detection is probabilistic. Email or phone matches trigger review; name and company are supporting signals and never establish identity by themselves.
+
+Data Table lookups, lead insertion, key insertion, and cleanup are separate operations. Concurrent requests can race because n8n Data Tables do not provide database-level uniqueness or atomic transactions across these operations.
+
+Use this version for demonstrations, prototypes, and low-concurrency intake. High-concurrency or business-critical systems should enforce idempotency, expiry, and duplicate-review controls in a transactional database.
+
+Before production use, also add webhook authentication, rate limiting, bounded retries, failure monitoring, and explicit lead-retention rules.

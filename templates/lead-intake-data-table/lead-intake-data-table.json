@@ -17,7 +17,7 @@
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "const input = $json.body ?? {};\nconst headers = $json.headers ?? {};\n\nconst idempotencyKey = String(\n  headers['idempotency-key']\n  ?? headers['x-idempotency-key']\n  ?? input.idempotencyKey\n  ?? ''\n).trim();\n\nconst name = String(input.name ?? '').trim().slice(0, 200);\nconst email = String(input.email ?? '').trim().toLowerCase().slice(0, 320);\nconst rawPhone = String(input.phone ?? '').trim();\nconst phoneDigits = rawPhone.replace(/\\D/g, '');\nconst phone = (phoneDigits.startsWith('00') ? phoneDigits.slice(2) : phoneDigits).slice(0, 30);\nconst company = String(input.company ?? '').trim().slice(0, 200);\nconst message = String(input.message ?? '').trim().slice(0, 5000);\nconst source = String(input.source ?? 'website').trim().slice(0, 100);\nconst errors = [];\n\nif (!idempotencyKey) errors.push('An Idempotency-Key header is required');\nif (idempotencyKey.length > 200) errors.push('The idempotency key must not exceed 200 characters');\nif (!email || !/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email)) errors.push('A valid email is required');\n\nconst payloadForHash = { name, email, company, message, source };\nif (phone) payloadForHash.phone = phone;\nconst normalizedPayload = JSON.stringify(payloadForHash);\n\nreturn { json: { valid: errors.length === 0, errors, idempotencyKey, name, email, phone, company, message, source, normalizedPayload } };"
+        "jsCode": "const IDEMPOTENCY_TTL_HOURS = 24; // Change this value to configure key lifetime.\nconst input = $json.body ?? {};\nconst headers = $json.headers ?? {};\n\nconst idempotencyKey = String(\n  headers['idempotency-key']\n  ?? headers['x-idempotency-key']\n  ?? input.idempotencyKey\n  ?? ''\n).trim();\n\nconst name = String(input.name ?? '').trim().slice(0, 200);\nconst email = String(input.email ?? '').trim().toLowerCase().slice(0, 320);\nconst rawPhone = String(input.phone ?? '').trim();\nconst phoneDigits = rawPhone.replace(/\\D/g, '');\nconst phone = (phoneDigits.startsWith('00') ? phoneDigits.slice(2) : phoneDigits).slice(0, 30);\nconst company = String(input.company ?? '').trim().slice(0, 200);\nconst message = String(input.message ?? '').trim().slice(0, 5000);\nconst source = String(input.source ?? 'website').trim().slice(0, 100);\nconst receivedAt = new Date();\nconst expiresAt = new Date(receivedAt.getTime() + IDEMPOTENCY_TTL_HOURS * 60 * 60 * 1000);\nconst errors = [];\n\nif (!idempotencyKey) errors.push('An Idempotency-Key header is required');\nif (idempotencyKey.length > 200) errors.push('The idempotency key must not exceed 200 characters');\nif (!email || !/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email)) errors.push('A valid email is required');\n\nconst payloadForHash = { name, email, company, message, source };\nif (phone) payloadForHash.phone = phone;\nconst normalizedPayload = JSON.stringify(payloadForHash);\n\nreturn { json: { valid: errors.length === 0, errors, idempotencyKey, name, email, phone, company, message, source, normalizedPayload, receivedAt: receivedAt.toISOString(), expiresAt: expiresAt.toISOString() } };"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -58,8 +58,6 @@
         "operation": "create",
         "tableName": "lead_intake_template",
         "columns": {"column": [
-          {"name": "idempotency_key", "type": "string"},
-          {"name": "payload_hash", "type": "string"},
           {"name": "name", "type": "string"},
           {"name": "email", "type": "string"},
           {"name": "phone", "type": "string"},
@@ -80,33 +78,56 @@
       "typeVersion": 1.1,
       "position": [880, -100],
       "id": "d35896a1-dbf2-4d56-b314-ab311b48c626",
-      "name": "Create or Reuse Table"
+      "name": "Create or Reuse Lead Table"
+    },
+    {
+      "parameters": {
+        "resource": "table",
+        "operation": "create",
+        "tableName": "lead_intake_idempotency",
+        "columns": {"column": [
+          {"name": "idempotency_key", "type": "string"},
+          {"name": "payload_hash", "type": "string"},
+          {"name": "lead_id", "type": "number"},
+          {"name": "created_at", "type": "date"},
+          {"name": "expires_at", "type": "date"}
+        ]},
+        "options": {"createIfNotExists": true}
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [1100, -100],
+      "id": "d19b01cb-4931-4ef6-8cb0-4ab06f801d3f",
+      "name": "Create or Reuse Key Table"
     },
     {
       "parameters": {
         "resource": "row",
         "operation": "get",
-        "dataTableId": {"__rl": true, "mode": "name", "value": "lead_intake_template"},
+        "dataTableId": {"__rl": true, "mode": "name", "value": "lead_intake_idempotency"},
         "matchType": "allConditions",
-        "filters": {"conditions": [{"keyName": "idempotency_key", "condition": "eq", "keyValue": "={{ $('Hash Normalized Payload').item.json.idempotencyKey }}"}]},
+        "filters": {"conditions": [
+          {"keyName": "idempotency_key", "condition": "eq", "keyValue": "={{ $('Hash Normalized Payload').item.json.idempotencyKey }}"},
+          {"keyName": "expires_at", "condition": "gt", "keyValue": "={{ $now.toISO() }}"}
+        ]},
         "returnAll": false,
         "limit": 1
       },
       "type": "n8n-nodes-base.dataTable",
       "typeVersion": 1.1,
-      "position": [1100, -100],
+      "position": [1320, -100],
       "id": "1978d441-a843-46ab-b89f-a314642b5db2",
-      "name": "Find Existing Lead",
+      "name": "Find Active Key",
       "alwaysOutputData": true
     },
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "const incoming = $('Hash Normalized Payload').item.json;\nconst existing = $json ?? {};\nconst exists = existing.id !== undefined && existing.id !== null;\nconst conflict = exists && existing.payload_hash !== incoming.payloadHash;\nreturn { json: { ...incoming, exists, conflict, existingLeadId: exists ? existing.id : null } };"
+        "jsCode": "const incoming = $('Hash Normalized Payload').item.json;\nconst existing = $json ?? {};\nconst exists = existing.id !== undefined && existing.id !== null;\nconst conflict = exists && existing.payload_hash !== incoming.payloadHash;\nreturn { json: { ...incoming, exists, conflict, existingLeadId: exists ? existing.lead_id : null } };"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [1320, -100],
+      "position": [1540, -100],
       "id": "880a64cf-1b89-4bbc-963e-c69ce79d2012",
       "name": "Classify Replay"
     },
@@ -114,7 +135,7 @@
       "parameters": {"conditions": {"options": {"caseSensitive": true, "typeValidation": "strict", "version": 3}, "conditions": [{"id": "df0af4d6-d6e4-45f0-96ec-5217e6aab6ae", "leftValue": "={{ $json.conflict }}", "rightValue": "", "operator": {"type": "boolean", "operation": "true", "singleValue": true}}], "combinator": "and"}, "options": {}},
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.3,
-      "position": [1540, -100],
+      "position": [1760, -100],
       "id": "83fd1a63-88ab-45b8-8cd9-d0ffde9deecd",
       "name": "Replay Conflict?"
     },
@@ -122,7 +143,7 @@
       "parameters": {"respondWith": "json", "responseBody": "={{ { accepted: false, error: 'IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD' } }}", "options": {"responseCode": 409}},
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.5,
-      "position": [1760, -220],
+      "position": [1980, -220],
       "id": "1e064268-a546-49ae-a1a4-5ca895467741",
       "name": "Reject Replay Conflict"
     },
@@ -130,7 +151,7 @@
       "parameters": {"conditions": {"options": {"caseSensitive": true, "typeValidation": "strict", "version": 3}, "conditions": [{"id": "ebfe0ffc-623a-47a6-985c-e4c91d4655e2", "leftValue": "={{ $json.exists }}", "rightValue": "", "operator": {"type": "boolean", "operation": "true", "singleValue": true}}], "combinator": "and"}, "options": {}},
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.3,
-      "position": [1760, -40],
+      "position": [1980, -40],
       "id": "c4135d58-fae1-4ea3-bcea-311cf8ca6cdf",
       "name": "Already Exists?"
     },
@@ -138,7 +159,7 @@
       "parameters": {"respondWith": "json", "responseBody": "={{ { accepted: true, duplicate: true, leadId: $json.existingLeadId } }}", "options": {"responseCode": 200}},
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.5,
-      "position": [1980, -100],
+      "position": [2200, -100],
       "id": "809969f7-a5e4-4725-8ea0-5863f70aac68",
       "name": "Return Existing Lead"
     },
@@ -151,7 +172,7 @@
       },
       "type": "n8n-nodes-base.dataTable",
       "typeVersion": 1.1,
-      "position": [1980, 60],
+      "position": [2200, 60],
       "id": "ac310d5b-3778-44f1-bf3d-8083fae3b196",
       "name": "Find Possible Duplicate",
       "alwaysOutputData": true
@@ -163,7 +184,7 @@
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [2200, 60],
+      "position": [2420, 60],
       "id": "7a9d04f9-9e3e-42d5-a194-0e93a51ee8c5",
       "name": "Classify Possible Duplicate"
     },
@@ -173,8 +194,6 @@
         "operation": "insert",
         "dataTableId": {"__rl": true, "mode": "name", "value": "lead_intake_template"},
         "columns": {"mappingMode": "defineBelow", "value": {
-          "idempotency_key": "={{ $json.idempotencyKey }}",
-          "payload_hash": "={{ $json.payloadHash }}",
           "name": "={{ $json.name }}",
           "email": "={{ $json.email }}",
           "phone": "={{ $json.phone }}",
@@ -186,27 +205,109 @@
           "duplicate_signals": "={{ $json.duplicateSignals }}",
           "attempt_count": 0,
           "last_error": "",
-          "received_at": "={{ $now.toISO() }}"
+          "received_at": "={{ $json.receivedAt }}"
         }},
         "options": {}
       },
       "type": "n8n-nodes-base.dataTable",
       "typeVersion": 1.1,
-      "position": [2420, 60],
+      "position": [2640, 60],
       "id": "1f8933b0-6fb8-4354-9d8c-33128393e9da",
       "name": "Insert New Lead"
     },
     {
-      "parameters": {"respondWith": "json", "responseBody": "={{ { accepted: true, duplicate: false, leadId: $json.id } }}", "options": {"responseCode": 202}},
+      "parameters": {
+        "resource": "row",
+        "operation": "insert",
+        "dataTableId": {"__rl": true, "mode": "name", "value": "lead_intake_idempotency"},
+        "columns": {"mappingMode": "defineBelow", "value": {
+          "idempotency_key": "={{ $('Classify Possible Duplicate').item.json.idempotencyKey }}",
+          "payload_hash": "={{ $('Classify Possible Duplicate').item.json.payloadHash }}",
+          "lead_id": "={{ $('Insert New Lead').item.json.id }}",
+          "created_at": "={{ $('Classify Possible Duplicate').item.json.receivedAt }}",
+          "expires_at": "={{ $('Classify Possible Duplicate').item.json.expiresAt }}"
+        }},
+        "options": {}
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [2860, 60],
+      "id": "9d02abf4-ff18-43c5-9bf6-a4e663524fec",
+      "name": "Store Idempotency Key"
+    },
+    {
+      "parameters": {"respondWith": "json", "responseBody": "={{ { accepted: true, duplicate: false, leadId: $('Insert New Lead').item.json.id } }}", "options": {"responseCode": 202}},
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.5,
-      "position": [2640, 60],
+      "position": [3080, 60],
       "id": "4ac7fcb8-49e2-4a72-b016-57ab0f850383",
       "name": "Return New Lead"
     },
     {
+      "parameters": {"rule": {"interval": [{"field": "hours", "hoursInterval": 1}]}},
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.4,
+      "position": [0, 460],
+      "id": "8d501ea7-5bcd-41b3-b370-9e28765a6dac",
+      "name": "Cleanup Schedule"
+    },
+    {
       "parameters": {
-        "content": "# Lead intake with layered duplicate checks\n\nThis workflow accepts lead submissions, validates required input, and stores valid requests in an n8n Data Table. Request-level idempotency remains authoritative: the same key and payload returns the existing lead, while reuse with a changed payload returns a conflict.\n\nFor a new idempotency key, the workflow also looks for the same normalized email or non-empty normalized phone. It always inserts the submission. A likely person-level duplicate receives `manual_review`, a possible matching row ID, and the signals that matched. Name and company only add context after an email or phone match.\n\n### How it works\n\nThe workflow normalizes business fields, hashes only that normalized payload, checks the idempotency key, then scans stored leads for contact matches before inserting. Responses stay 202, 200, 409, or 400.\n\n### Setup\n\nImport the workflow and use the test webhook first. Fresh imports create `lead_intake_template`. For an existing table, add the three columns listed in the README before testing. Review authentication and database-level controls before production use.",
+        "resource": "table",
+        "operation": "create",
+        "tableName": "lead_intake_idempotency",
+        "columns": {"column": [
+          {"name": "idempotency_key", "type": "string"},
+          {"name": "payload_hash", "type": "string"},
+          {"name": "lead_id", "type": "number"},
+          {"name": "created_at", "type": "date"},
+          {"name": "expires_at", "type": "date"}
+        ]},
+        "options": {"createIfNotExists": true}
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [220, 460],
+      "id": "29808f06-56fb-4342-b080-b5e06b088c2b",
+      "name": "Prepare Cleanup Table"
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "get",
+        "dataTableId": {"__rl": true, "mode": "name", "value": "lead_intake_idempotency"},
+        "matchType": "allConditions",
+        "filters": {"conditions": [{"keyName": "expires_at", "condition": "lt", "keyValue": "={{ $now.toISO() }}"}]},
+        "returnAll": false,
+        "limit": 100,
+        "orderBy": true,
+        "orderByColumn": "expires_at",
+        "orderByDirection": "ASC"
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [440, 460],
+      "id": "c6890e0c-e316-486e-8711-e7a27282020f",
+      "name": "Find Expired Keys"
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "deleteRows",
+        "dataTableId": {"__rl": true, "mode": "name", "value": "lead_intake_idempotency"},
+        "matchType": "allConditions",
+        "filters": {"conditions": [{"keyName": "id", "condition": "eq", "keyValue": "={{ $json.id }}"}]},
+        "options": {}
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [660, 460],
+      "id": "f168b82d-07c4-4d84-a995-f55d66b5c8ec",
+      "name": "Delete Expired Key"
+    },
+    {
+      "parameters": {
+        "content": "# Lead intake with expiring request keys\n\nThis workflow validates lead submissions and stores lead data separately from request-idempotency records. Active keys keep the existing replay behavior: the same normalized payload returns the original lead, while changed payloads return a conflict. Keys expire after 24 hours by default without deleting or changing their leads.\n\nNew requests still compare normalized email and non-empty phone values against stored leads. Possible person-level duplicates are inserted separately with `manual_review`, a matching lead ID, and the signals that matched. Name and company remain supporting signals only.\n\n### How it works\n\nThe webhook path hashes normalized business fields, checks only unexpired keys, inserts the lead, then stores a key record with its expiry. A scheduled path removes at most 100 expired key records each hour. Responses stay 202, 200, 409, or 400.\n\n### Setup\n\nImport the inactive workflow and complete the v0.3 migration in the README. Change `IDEMPOTENCY_TTL_HOURS` in **Validate and Normalize** if 24 hours is not suitable. Test every path before activation.",
         "height": 300,
         "width": 760,
         "color": 1
@@ -232,9 +333,9 @@
     },
     {
       "parameters": {
-        "content": "## Enforce request idempotency\n\nCreate or reuse the table, then return the existing lead or reject a conflicting replay.",
+        "content": "## Enforce request idempotency\n\nUse the separate key table to return the original lead or reject a conflicting replay while the key is active.",
         "height": 500,
-        "width": 1060,
+        "width": 1280,
         "color": 7
       },
       "type": "n8n-nodes-base.stickyNote",
@@ -245,31 +346,49 @@
     },
     {
       "parameters": {
-        "content": "## Flag possible people duplicates\n\nCompare normalized contact details, attach review signals, and insert every new submission without merging it.",
+        "content": "## Flag possible people duplicates\n\nCompare normalized contact details, insert the lead, then store its expiring request key without merging uncertain matches.",
         "height": 320,
+        "width": 1020,
+        "color": 7
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [2140, -40],
+      "id": "8ee02455-532d-41db-ad94-ae5af9f49ace",
+      "name": "Duplicate Review Section"
+    },
+    {
+      "parameters": {
+        "content": "## Bound key cleanup\n\nEach hourly run removes at most 100 expired key records. Lead rows are never part of this cleanup path.",
+        "height": 300,
         "width": 800,
         "color": 7
       },
       "type": "n8n-nodes-base.stickyNote",
       "typeVersion": 1,
-      "position": [1920, -40],
-      "id": "8ee02455-532d-41db-ad94-ae5af9f49ace",
-      "name": "Duplicate Review Section"
+      "position": [-40, 360],
+      "id": "213a1bda-1b99-47cd-b199-36d0d213e0fc",
+      "name": "Cleanup Section"
     }
   ],
   "connections": {
     "Receive Lead": {"main": [[{"node": "Validate and Normalize", "type": "main", "index": 0}]]},
     "Validate and Normalize": {"main": [[{"node": "Input Valid?", "type": "main", "index": 0}]]},
     "Input Valid?": {"main": [[{"node": "Hash Normalized Payload", "type": "main", "index": 0}], [{"node": "Reject Invalid Request", "type": "main", "index": 0}]]},
-    "Hash Normalized Payload": {"main": [[{"node": "Create or Reuse Table", "type": "main", "index": 0}]]},
-    "Create or Reuse Table": {"main": [[{"node": "Find Existing Lead", "type": "main", "index": 0}]]},
-    "Find Existing Lead": {"main": [[{"node": "Classify Replay", "type": "main", "index": 0}]]},
+    "Hash Normalized Payload": {"main": [[{"node": "Create or Reuse Lead Table", "type": "main", "index": 0}]]},
+    "Create or Reuse Lead Table": {"main": [[{"node": "Create or Reuse Key Table", "type": "main", "index": 0}]]},
+    "Create or Reuse Key Table": {"main": [[{"node": "Find Active Key", "type": "main", "index": 0}]]},
+    "Find Active Key": {"main": [[{"node": "Classify Replay", "type": "main", "index": 0}]]},
     "Classify Replay": {"main": [[{"node": "Replay Conflict?", "type": "main", "index": 0}]]},
     "Replay Conflict?": {"main": [[{"node": "Reject Replay Conflict", "type": "main", "index": 0}], [{"node": "Already Exists?", "type": "main", "index": 0}]]},
     "Already Exists?": {"main": [[{"node": "Return Existing Lead", "type": "main", "index": 0}], [{"node": "Find Possible Duplicate", "type": "main", "index": 0}]]},
     "Find Possible Duplicate": {"main": [[{"node": "Classify Possible Duplicate", "type": "main", "index": 0}]]},
     "Classify Possible Duplicate": {"main": [[{"node": "Insert New Lead", "type": "main", "index": 0}]]},
-    "Insert New Lead": {"main": [[{"node": "Return New Lead", "type": "main", "index": 0}]]}
+    "Insert New Lead": {"main": [[{"node": "Store Idempotency Key", "type": "main", "index": 0}]]},
+    "Store Idempotency Key": {"main": [[{"node": "Return New Lead", "type": "main", "index": 0}]]},
+    "Cleanup Schedule": {"main": [[{"node": "Prepare Cleanup Table", "type": "main", "index": 0}]]},
+    "Prepare Cleanup Table": {"main": [[{"node": "Find Expired Keys", "type": "main", "index": 0}]]},
+    "Find Expired Keys": {"main": [[{"node": "Delete Expired Key", "type": "main", "index": 0}]]}
   },
   "pinData": {},
   "active": false,
