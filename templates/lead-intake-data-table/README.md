@@ -120,6 +120,22 @@ Invalid request, HTTP 400:
 }
 ```
 
+## Verified test results
+
+The updated workflow was imported and tested in n8n on 2026-09-15:
+
+- A new request using `v04-expiry-001` returned HTTP 202 and created lead 8 with `status=pending`.
+- Replaying the active key with the same payload returned HTTP 200 and lead 8.
+- Reusing the active key with a changed payload returned HTTP 409.
+- Matching normalized contact details with `v04-expiry-002` returned HTTP 202 and created lead 9 with `status=manual_review`, `possible_duplicate_of=8`, and `duplicate_signals=email,phone,name,company`.
+- A different contact without a phone using `v04-expiry-003` returned HTTP 202 and created lead 10 with `status=pending` and empty duplicate fields.
+- An invalid request returned HTTP 400 with both expected validation errors.
+- The default `expires_at` value was 24 hours after `created_at`.
+- After the original `v04-expiry-001` key was set to expire in the past, reusing its original payload returned HTTP 202 and created lead 11. Lead 11 had `status=manual_review`, `possible_duplicate_of=8`, and `duplicate_signals=email,phone,name,company`.
+- The workflow created a new active `v04-expiry-001` key record linked to lead 11.
+- `Find Expired Keys` selected only the expired key linked to lead 8. `Delete Expired Key` removed it while the active key linked to lead 11 remained.
+- Leads 8 and 11 remained unchanged after key cleanup.
+
 ## Manual n8n test sequence
 
 Keep the workflow inactive. Clear both test tables, click **Execute workflow**, copy the test webhook URL from **Receive Lead**, and set it as `URL` in your shell.
