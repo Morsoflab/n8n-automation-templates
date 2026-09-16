@@ -256,6 +256,18 @@ Keep `EVALUATION_DATE` set to `2030-06-20`. Use unique fictional IDs unless the 
 7. **Multiple existing rows:** Seed at least three history rows, including two rows for one invoice-stage key with different `prepared_at` values. Load matching and non-matching invoices. Expect every matching key to reach `already_prepared`, the newest matching row ID to be reported for the duplicate key, and every new key to reach `ready_for_review`.
 8. **No cross-item contamination:** Load eligible, paid, disputed, invalid-date, and contact-missing invoices together, then reorder them and run again with a cleared table. Expect each invoice ID to retain its own classification, reason, recipient, draft, and output path in both orders.
 
+## Verified on n8n
+
+These results were recorded on self-hosted n8n 2.37.9 with the workflow inactive, no external delivery nodes enabled, and the `invoice_reminder_history` Data Table.
+
+| Scenario | Expected | Actual |
+| --- | --- | --- |
+| Empty history with mixed states | Two eligible invoices become `ready_for_review`; the paid invoice becomes `no_action_required`; two history rows are created. | `INV-FICTION-1001` was `upcoming` at `upcoming_3_days` and created history row 2. `INV-FICTION-1002` was `overdue` at `overdue_7_days` and created row 3. `INV-FICTION-1003` was `paid`, returned `no_action_required`, and had `draft=null`. The table contained exactly two rows. |
+| Unchanged replay | Both eligible invoice-stage pairs become `already_prepared`; their history IDs remain unchanged; no rows are added. | `INV-FICTION-1001` returned history row 2 and `INV-FICTION-1002` returned row 3. The table remained at exactly two rows. |
+| One new and one existing reminder | The changed invoice ID creates a new preparation; the unchanged invoice remains `already_prepared`; the paid invoice remains separate. | The test input changed only `INV-FICTION-1001` to `INV-FICTION-1011`. It returned `ready_for_review` with new history row 4. `INV-FICTION-1002` returned `already_prepared` with row 3. The paid invoice stayed on its own path, with no cross-item contamination. |
+
+The first imported version dropped later eligible invoices because a Data Table lookup used a global limit of one. Its ambiguous `.item` references also failed with `Multiple matches`. Commit `5e186f2549a844a49c913b0044e7b5b4bf151838` replaced that path with stable invoice ID and reminder-stage correlation. The live tests confirmed that two eligible invoices survive one execution, empty history works, replay protection persists across executions, and existing and new reminders can share a batch.
+
 ## Connecting a delivery channel later
 
 Keep **Ready for Review** as the preparation boundary. Add a separate human approval step after it, then connect the approved branch to an email, CRM, ERP, or WhatsApp node. Map only fields from `draft.recipient`, `draft.subject`, `draft.title`, and `draft.messageVariables`.
