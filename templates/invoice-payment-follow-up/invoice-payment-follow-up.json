@@ -1,0 +1,659 @@
+{
+  "name": "Prepare Invoice Payment Follow-ups for Review",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -900,
+        0
+      ],
+      "id": "0b6b2380-d664-49e1-9016-f02cc94eb308",
+      "name": "Start Manual Test"
+    },
+    {
+      "parameters": {
+        "resource": "table",
+        "operation": "create",
+        "tableName": "invoice_reminder_history",
+        "columns": {
+          "column": [
+            {
+              "name": "invoice_id",
+              "type": "string"
+            },
+            {
+              "name": "reminder_stage",
+              "type": "string"
+            },
+            {
+              "name": "classification",
+              "type": "string"
+            },
+            {
+              "name": "customer_id",
+              "type": "string"
+            },
+            {
+              "name": "recipient_email",
+              "type": "string"
+            },
+            {
+              "name": "recipient_phone",
+              "type": "string"
+            },
+            {
+              "name": "currency",
+              "type": "string"
+            },
+            {
+              "name": "outstanding_amount",
+              "type": "number"
+            },
+            {
+              "name": "due_date",
+              "type": "date"
+            },
+            {
+              "name": "review_status",
+              "type": "string"
+            },
+            {
+              "name": "draft_subject",
+              "type": "string"
+            },
+            {
+              "name": "prepared_at",
+              "type": "date"
+            },
+            {
+              "name": "source_updated_at",
+              "type": "date"
+            }
+          ]
+        },
+        "options": {
+          "createIfNotExists": true
+        }
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        -680,
+        0
+      ],
+      "id": "e4409b54-b999-4460-9457-df85a45aef39",
+      "name": "Create or Reuse Reminder History",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const dateFromToday = days => {\n  const date = new Date();\n  date.setUTCHours(0, 0, 0, 0);\n  date.setUTCDate(date.getUTCDate() + days);\n  return date.toISOString().slice(0, 10);\n};\n\n// Fictional records only. Replace this array or connect another credential-free input.\nconst invoices = [\n  {\n    invoiceId: 'INV-FICTION-1001',\n    customer: { id: 'CUST-FICTION-01', name: 'Northstar Demo GmbH', email: 'billing@northstar-demo.example', phone: '' },\n    currency: 'EUR',\n    totalAmount: 1200,\n    paidAmount: 0,\n    outstandingAmount: 1200,\n    dueDate: dateFromToday(2),\n    paymentStatus: 'unpaid',\n    disputed: false,\n    updatedAt: new Date().toISOString(),\n  },\n  {\n    invoiceId: 'INV-FICTION-1002',\n    customer: { id: 'CUST-FICTION-02', name: 'Riverbank Sample SAS', email: '', phone: '+33 1 00 00 00 00' },\n    currency: 'EUR',\n    totalAmount: 500,\n    paidAmount: 0,\n    outstandingAmount: 500,\n    dueDate: dateFromToday(-8),\n    paymentStatus: 'unpaid',\n    disputed: false,\n    updatedAt: new Date().toISOString(),\n  },\n  {\n    invoiceId: 'INV-FICTION-1003',\n    customer: { id: 'CUST-FICTION-03', name: 'Orchard Example Ltd', email: 'accounts@orchard-example.example', phone: '' },\n    currency: 'GBP',\n    totalAmount: 800,\n    paidAmount: 800,\n    outstandingAmount: 0,\n    dueDate: dateFromToday(-5),\n    paymentStatus: 'paid',\n    disputed: false,\n    updatedAt: new Date().toISOString(),\n  },\n];\n\nreturn invoices.map(invoice => ({ json: invoice }));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -460,
+        0
+      ],
+      "id": "f45302f4-e38f-4407-a571-7fb63874be76",
+      "name": "Load Fictional Invoice Samples"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const UPCOMING_DAYS_BEFORE_DUE = 3;\nconst OVERDUE_STAGES = [\n  { stage: 'overdue_3_days', minimumDaysOverdue: 3 },\n  { stage: 'overdue_7_days', minimumDaysOverdue: 7 },\n  { stage: 'overdue_14_days', minimumDaysOverdue: 14 },\n];\nconst EVALUATION_DATE = ''; // Optional YYYY-MM-DD test override; blank uses the current UTC date.\nconst AMOUNT_TOLERANCE = 0.01;\n\nconst raw = $json ?? {};\nconst text = (value, max = 200) => String(value ?? '').trim().replace(/\\s+/g, ' ').slice(0, max);\nconst invoiceId = text(raw.invoiceId);\nconst customerId = text(raw.customer?.id);\nconst customerName = text(raw.customer?.name);\nconst email = text(raw.customer?.email, 320).toLowerCase();\nconst phoneDigits = text(raw.customer?.phone, 50).replace(/\\D/g, '');\nconst phone = phoneDigits.startsWith('00') ? `+${phoneDigits.slice(2)}` : phoneDigits ? `+${phoneDigits.replace(/^\\+/, '')}` : '';\nconst currency = text(raw.currency, 3).toUpperCase();\nconst paymentStatus = text(raw.paymentStatus, 40).toLowerCase().replace(/[ -]+/g, '_');\nconst disputed = raw.disputed === true || String(raw.disputed).toLowerCase() === 'true';\nconst totalAmount = Number(raw.totalAmount);\nconst paidAmount = Number(raw.paidAmount);\nconst outstandingAmount = Number(raw.outstandingAmount);\nconst sourceUpdatedAt = text(raw.updatedAt, 40);\nconst dueDate = text(raw.dueDate, 10);\nconst errors = [];\nconst reviewReasons = [];\n\nconst parseDateOnly = value => {\n  if (!/^\\d{4}-\\d{2}-\\d{2}$/.test(value)) return null;\n  const date = new Date(`${value}T00:00:00.000Z`);\n  return Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== value ? null : date;\n};\n\nif (!invoiceId) errors.push('invoice_id_missing');\nif (!customerId || !customerName) errors.push('customer_identity_missing');\nif (!/^[A-Z]{3}$/.test(currency)) errors.push('currency_invalid');\nif (![totalAmount, paidAmount, outstandingAmount].every(Number.isFinite)) errors.push('amount_invalid');\nif ([totalAmount, paidAmount, outstandingAmount].some(value => Number.isFinite(value) && value < 0)) errors.push('amount_negative');\nconst due = parseDateOnly(dueDate);\nif (!due) errors.push('due_date_invalid');\nif (!['unpaid', 'paid', 'partially_paid'].includes(paymentStatus)) errors.push('payment_status_invalid');\n\nlet classification = 'invalid';\nlet reminderStage = '';\nlet outputPath = 'invalid_record';\nlet actionReason = errors.join(',');\n\nif (errors.length === 0) {\n  const inconsistentAmount = Math.abs(totalAmount - paidAmount - outstandingAmount) > AMOUNT_TOLERANCE;\n  const paidConflict = paymentStatus === 'paid' && outstandingAmount > AMOUNT_TOLERANCE;\n  const unpaidConflict = paymentStatus === 'unpaid' && (paidAmount > AMOUNT_TOLERANCE || outstandingAmount <= AMOUNT_TOLERANCE);\n  const partialByAmount = paidAmount > AMOUNT_TOLERANCE && outstandingAmount > AMOUNT_TOLERANCE;\n\n  if (inconsistentAmount) reviewReasons.push('amounts_inconsistent');\n  if (paidConflict || unpaidConflict) reviewReasons.push('payment_state_conflict');\n  if (!email && !phone) reviewReasons.push('customer_contact_missing');\n\n  if (disputed) {\n    classification = 'disputed';\n    reviewReasons.push('invoice_disputed');\n  } else if (paymentStatus === 'partially_paid' || partialByAmount) {\n    classification = 'partially_paid';\n    reviewReasons.push('partial_payment');\n  } else if (reviewReasons.length > 0) {\n    classification = 'requiring_manual_review';\n  } else if (paymentStatus === 'paid' && outstandingAmount <= AMOUNT_TOLERANCE) {\n    classification = 'paid';\n    outputPath = 'no_action_required';\n    actionReason = 'invoice_paid';\n  } else {\n    const evaluation = parseDateOnly(EVALUATION_DATE) ?? parseDateOnly(new Date().toISOString().slice(0, 10));\n    const daysUntilDue = Math.round((due.getTime() - evaluation.getTime()) / 86400000);\n\n    if (daysUntilDue > 0) {\n      classification = 'upcoming';\n      if (daysUntilDue <= UPCOMING_DAYS_BEFORE_DUE) reminderStage = `upcoming_${UPCOMING_DAYS_BEFORE_DUE}_days`;\n      else actionReason = 'outside_upcoming_interval';\n    } else if (daysUntilDue === 0) {\n      classification = 'due';\n      reminderStage = 'due_today';\n    } else {\n      classification = 'overdue';\n      const daysOverdue = Math.abs(daysUntilDue);\n      reminderStage = [...OVERDUE_STAGES].reverse().find(stage => daysOverdue >= stage.minimumDaysOverdue)?.stage ?? '';\n      if (!reminderStage) actionReason = 'before_first_overdue_interval';\n    }\n\n    if (reminderStage) {\n      outputPath = 'ready_for_review';\n      actionReason = 'reminder_stage_eligible';\n    } else {\n      outputPath = 'no_action_required';\n    }\n  }\n\n  if (reviewReasons.length > 0) {\n    outputPath = 'manual_review';\n    actionReason = [...new Set(reviewReasons)].join(',');\n    reminderStage = '';\n  }\n}\n\nconst preparedAt = new Date().toISOString();\nconst draft = reminderStage ? {\n  reminderStage,\n  recipient: { customerId, customerName, email, phone },\n  subject: `Payment reminder review: invoice ${invoiceId}`,\n  title: `Review ${reminderStage} for ${invoiceId}`,\n  messageVariables: { invoiceId, customerName, currency, totalAmount, paidAmount, outstandingAmount, dueDate },\n  invoice: { invoiceId, currency, totalAmount, paidAmount, outstandingAmount, dueDate, paymentStatus, disputed },\n  reviewStatus: 'pending_manual_approval',\n} : null;\n\nreturn { json: { invoiceId, customerId, customerName, email, phone, currency, totalAmount, paidAmount, outstandingAmount, dueDate, paymentStatus, disputed, sourceUpdatedAt, classification, reminderStage, outputPath, actionReason, preparedAt, draft } };"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -160,
+        0
+      ],
+      "id": "db9c938c-c806-4b07-966d-d33508642716",
+      "name": "Validate Normalize and Classify"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const seen = new Set();\nreturn $input.all().map((item, index) => {\n  const value = item.json;\n  if (value.outputPath !== 'ready_for_review') return item;\n  const key = `${value.invoiceId}::${value.reminderStage}`;\n  if (!seen.has(key)) {\n    seen.add(key);\n    return item;\n  }\n  return { json: { ...value, outputPath: 'already_prepared', actionReason: 'duplicate_in_execution', reviewStatus: 'already_prepared', historyRecordId: null }, pairedItem: { item: index } };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-120, 220],
+      "id": "5a29fa58-1cab-4b3a-ab02-ad5a253c069a",
+      "name": "Prevent Batch Replays"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "c291a95d-34ab-429b-bd22-c34ae71ec148",
+              "leftValue": "={{ $json.outputPath }}",
+              "rightValue": "invalid_record",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        80,
+        0
+      ],
+      "id": "171fbcd3-58a3-4581-896e-91028e046738",
+      "name": "Invalid Record?"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        300,
+        -260
+      ],
+      "id": "1693861c-5a09-4204-a4fb-2d64692cec6f",
+      "name": "Invalid Record"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "cc1d76c5-d7fc-4da9-a184-2a8661c82e51",
+              "leftValue": "={{ $json.outputPath }}",
+              "rightValue": "manual_review",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        300,
+        0
+      ],
+      "id": "4528b935-afc8-43bd-adad-ef67c8a455b9",
+      "name": "Manual Review Required?"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        520,
+        -100
+      ],
+      "id": "3ad0b945-b735-47fa-943c-ad1ab61640bf",
+      "name": "Manual Review"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "270b7e66-c95c-48df-9638-12d345c44928",
+              "leftValue": "={{ $json.outputPath }}",
+              "rightValue": "no_action_required",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        520,
+        100
+      ],
+      "id": "05344535-fd52-4707-9704-89138d33a459",
+      "name": "No Action Required?"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        740,
+        260
+      ],
+      "id": "2c461f59-c1fd-48ba-a7bb-abd2f1fc8c2e",
+      "name": "No Action Required"
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "invoice_reminder_history"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "invoice_id",
+              "condition": "eq",
+              "keyValue": "={{ $json.invoiceId }}"
+            },
+            {
+              "keyName": "reminder_stage",
+              "condition": "eq",
+              "keyValue": "={{ $json.reminderStage }}"
+            }
+          ]
+        },
+        "returnAll": false,
+        "limit": 1
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        740,
+        20
+      ],
+      "id": "0a0232f5-e5eb-43a9-bb8d-17a0c86d8a51",
+      "name": "Find Exact Reminder Stage",
+      "alwaysOutputData": true,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const invoice = $('Validate Normalize and Classify').item.json;\nconst history = $json ?? {};\nconst alreadyPrepared = history.id !== undefined && history.id !== null;\nreturn { json: { ...invoice, outputPath: alreadyPrepared ? 'already_prepared' : invoice.outputPath, reviewStatus: alreadyPrepared ? 'already_prepared' : 'pending_manual_approval', historyRecordId: alreadyPrepared ? history.id : null, previousPreparedAt: alreadyPrepared ? history.prepared_at : null } };"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        960,
+        20
+      ],
+      "id": "6d4044dc-2a11-4507-99ad-57eb15eac5e9",
+      "name": "Check Reminder History"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "d30ae96a-19df-43d0-ad39-052d82579eb3",
+              "leftValue": "={{ $json.outputPath }}",
+              "rightValue": "already_prepared",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1180,
+        20
+      ],
+      "id": "1f250253-1d89-4582-817b-e950096f34ac",
+      "name": "Already Prepared?"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1400,
+        -120
+      ],
+      "id": "258126f1-5967-4302-bf6d-5c31f42dbed0",
+      "name": "Already Prepared"
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "insert",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "invoice_reminder_history"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "invoice_id": "={{ $json.invoiceId }}",
+            "reminder_stage": "={{ $json.reminderStage }}",
+            "classification": "={{ $json.classification }}",
+            "customer_id": "={{ $json.customerId }}",
+            "recipient_email": "={{ $json.email }}",
+            "recipient_phone": "={{ $json.phone }}",
+            "currency": "={{ $json.currency }}",
+            "outstanding_amount": "={{ $json.outstandingAmount }}",
+            "due_date": "={{ $json.dueDate }}",
+            "review_status": "pending_manual_approval",
+            "draft_subject": "={{ $json.draft.subject }}",
+            "prepared_at": "={{ $json.preparedAt }}",
+            "source_updated_at": "={{ $json.sourceUpdatedAt }}"
+          }
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        1400,
+        100
+      ],
+      "id": "16aef9d9-0d33-4124-895a-f629809bc1a9",
+      "name": "Store Reminder Preparation",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const invoice = $('Check Reminder History').item.json;\nreturn { json: { ...invoice, historyRecordId: $json.id ?? null, outputPath: 'ready_for_review', reviewStatus: 'pending_manual_approval', deliveryEnabled: false } };"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1620,
+        100
+      ],
+      "id": "e38fffe0-9b08-4daf-bda0-967675f7af3f",
+      "name": "Ready for Review"
+    },
+    {
+      "parameters": {
+        "content": "# Prepare invoice follow-ups for human review\n\nThis credential-free workflow validates fictional invoice records, normalizes customer and finance fields, classifies payment state, and prepares reminder drafts without contacting anyone. Paid or out-of-window records require no action. Missing, disputed, partial, conflicting, or invalid records follow separate review paths.\n\nEligible reminders are checked against an append-only Data Table history using the invoice ID and reminder stage. A matching stage is returned as already prepared; a new stage is stored with its draft metadata for audit. n8n Data Tables do not provide database-level uniqueness, so concurrent executions can still race.\n\n### How it works\n\nA Manual Trigger loads safe sample invoices. Validation assigns one of five output paths. Eligible drafts use configurable upcoming and overdue intervals, then pass through exact-match replay protection before storage. Delivery remains disabled.\n\n### Setup\n\nImport the workflow and keep it inactive. Review the constants in **Validate Normalize and Classify**, run the documented tests, and replace the sample node only after mapping your own fields. Add a delivery channel after **Ready for Review** only when a human approval gate, credentials, retention rules, and failure monitoring are in place.",
+        "height": 320,
+        "width": 900,
+        "color": 1
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -980,
+        -700
+      ],
+      "id": "7879db85-b984-4d15-bc1b-bde246f40ce4",
+      "name": "Workflow Overview"
+    },
+    {
+      "parameters": {
+        "content": "## Prepare safe input\n\nCreate the local history table and load fictional records from a Manual Trigger.",
+        "height": 400,
+        "width": 760,
+        "color": 7
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -980,
+        -180
+      ],
+      "id": "ef8b5886-c252-4d0e-bbec-a30b75250a7f",
+      "name": "Input Section"
+    },
+    {
+      "parameters": {
+        "content": "## Validate and route\n\nNormalize each invoice independently, classify its state, and expose invalid, manual-review, and no-action paths.",
+        "height": 700,
+        "width": 900,
+        "color": 7
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -200,
+        -340
+      ],
+      "id": "39ce4d27-d5c5-475f-a43f-661d9727f119",
+      "name": "Classification Section"
+    },
+    {
+      "parameters": {
+        "content": "## Prevent repeated drafts\n\nCheck the exact invoice and stage before preparing a new history row.",
+        "height": 400,
+        "width": 620,
+        "color": 7
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        720,
+        -180
+      ],
+      "id": "8c3fa43d-5363-4dd1-953d-3bb6b49e9866",
+      "name": "Replay Protection Section"
+    },
+    {
+      "parameters": {
+        "content": "## Return review output\n\nReturn an existing stage or store a new channel-ready draft. No delivery node is included.",
+        "height": 500,
+        "width": 540,
+        "color": 7
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1360,
+        -250
+      ],
+      "id": "1fd2786a-e326-4819-8c58-99616b834adb",
+      "name": "Review Output Section"
+    }
+  ],
+  "connections": {
+    "Start Manual Test": {
+      "main": [
+        [
+          {
+            "node": "Create or Reuse Reminder History",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create or Reuse Reminder History": {
+      "main": [
+        [
+          {
+            "node": "Load Fictional Invoice Samples",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Fictional Invoice Samples": {
+      "main": [
+        [
+          {
+            "node": "Validate Normalize and Classify",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Normalize and Classify": {
+      "main": [
+        [
+          {
+            "node": "Prevent Batch Replays",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prevent Batch Replays": {
+      "main": [
+        [
+          {
+            "node": "Invalid Record?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Invalid Record?": {
+      "main": [
+        [
+          {
+            "node": "Invalid Record",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Manual Review Required?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Manual Review Required?": {
+      "main": [
+        [
+          {
+            "node": "Manual Review",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Action Required?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "No Action Required?": {
+      "main": [
+        [
+          {
+            "node": "No Action Required",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Find Exact Reminder Stage",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find Exact Reminder Stage": {
+      "main": [
+        [
+          {
+            "node": "Check Reminder History",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Reminder History": {
+      "main": [
+        [
+          {
+            "node": "Already Prepared?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Already Prepared?": {
+      "main": [
+        [
+          {
+            "node": "Already Prepared",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Store Reminder Preparation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store Reminder Preparation": {
+      "main": [
+        [
+          {
+            "node": "Ready for Review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
