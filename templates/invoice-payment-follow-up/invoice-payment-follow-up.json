@@ -87,7 +87,8 @@
       "name": "Create or Reuse Reminder History",
       "retryOnFail": true,
       "maxTries": 3,
-      "waitBetweenTries": 1000
+      "waitBetweenTries": 1000,
+      "onError": "continueErrorOutput"
     },
     {
       "parameters": {
@@ -111,7 +112,8 @@
       "alwaysOutputData": true,
       "retryOnFail": true,
       "maxTries": 3,
-      "waitBetweenTries": 1000
+      "waitBetweenTries": 1000,
+      "onError": "continueErrorOutput"
     },
     {
       "parameters": {
@@ -130,7 +132,7 @@
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "const UPCOMING_DAYS_BEFORE_DUE = 3;\nconst OVERDUE_STAGES = [\n  { stage: 'overdue_3_days', minimumDaysOverdue: 3 },\n  { stage: 'overdue_7_days', minimumDaysOverdue: 7 },\n  { stage: 'overdue_14_days', minimumDaysOverdue: 14 },\n];\nconst EVALUATION_DATE = ''; // Optional YYYY-MM-DD test override; blank uses the current UTC date.\nconst AMOUNT_TOLERANCE = 0.01;\n\nconst raw = $json ?? {};\nconst text = (value, max = 200) => String(value ?? '').trim().replace(/\\s+/g, ' ').slice(0, max);\nconst invoiceId = text(raw.invoiceId);\nconst customerId = text(raw.customer?.id);\nconst customerName = text(raw.customer?.name);\nconst email = text(raw.customer?.email, 320).toLowerCase();\nconst phoneDigits = text(raw.customer?.phone, 50).replace(/\\D/g, '');\nconst phone = phoneDigits.startsWith('00') ? `+${phoneDigits.slice(2)}` : phoneDigits ? `+${phoneDigits.replace(/^\\+/, '')}` : '';\nconst currency = text(raw.currency, 3).toUpperCase();\nconst paymentStatus = text(raw.paymentStatus, 40).toLowerCase().replace(/[ -]+/g, '_');\nconst disputed = raw.disputed === true || String(raw.disputed).toLowerCase() === 'true';\nconst totalAmount = Number(raw.totalAmount);\nconst paidAmount = Number(raw.paidAmount);\nconst outstandingAmount = Number(raw.outstandingAmount);\nconst sourceUpdatedAt = text(raw.updatedAt, 40);\nconst dueDate = text(raw.dueDate, 10);\nconst errors = [];\nconst reviewReasons = [];\n\nconst parseDateOnly = value => {\n  if (!/^\\d{4}-\\d{2}-\\d{2}$/.test(value)) return null;\n  const date = new Date(`${value}T00:00:00.000Z`);\n  return Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== value ? null : date;\n};\n\nif (!invoiceId) errors.push('invoice_id_missing');\nif (!customerId || !customerName) errors.push('customer_identity_missing');\nif (!/^[A-Z]{3}$/.test(currency)) errors.push('currency_invalid');\nif (![totalAmount, paidAmount, outstandingAmount].every(Number.isFinite)) errors.push('amount_invalid');\nif ([totalAmount, paidAmount, outstandingAmount].some(value => Number.isFinite(value) && value < 0)) errors.push('amount_negative');\nconst due = parseDateOnly(dueDate);\nif (!due) errors.push('due_date_invalid');\nif (!['unpaid', 'paid', 'partially_paid'].includes(paymentStatus)) errors.push('payment_status_invalid');\n\nlet classification = 'invalid';\nlet reminderStage = '';\nlet outputPath = 'invalid_record';\nlet actionReason = errors.join(',');\n\nif (errors.length === 0) {\n  const inconsistentAmount = Math.abs(totalAmount - paidAmount - outstandingAmount) > AMOUNT_TOLERANCE;\n  const paidConflict = paymentStatus === 'paid' && outstandingAmount > AMOUNT_TOLERANCE;\n  const unpaidConflict = paymentStatus === 'unpaid' && (paidAmount > AMOUNT_TOLERANCE || outstandingAmount <= AMOUNT_TOLERANCE);\n  const partialByAmount = paidAmount > AMOUNT_TOLERANCE && outstandingAmount > AMOUNT_TOLERANCE;\n\n  if (inconsistentAmount) reviewReasons.push('amounts_inconsistent');\n  if (paidConflict || unpaidConflict) reviewReasons.push('payment_state_conflict');\n  if (!email && !phone) reviewReasons.push('customer_contact_missing');\n\n  if (disputed) {\n    classification = 'disputed';\n    reviewReasons.push('invoice_disputed');\n  } else if (paymentStatus === 'partially_paid' || partialByAmount) {\n    classification = 'partially_paid';\n    reviewReasons.push('partial_payment');\n  } else if (reviewReasons.length > 0) {\n    classification = 'requiring_manual_review';\n  } else if (paymentStatus === 'paid' && outstandingAmount <= AMOUNT_TOLERANCE) {\n    classification = 'paid';\n    outputPath = 'no_action_required';\n    actionReason = 'invoice_paid';\n  } else {\n    const evaluation = parseDateOnly(EVALUATION_DATE) ?? parseDateOnly(new Date().toISOString().slice(0, 10));\n    const daysUntilDue = Math.round((due.getTime() - evaluation.getTime()) / 86400000);\n\n    if (daysUntilDue > 0) {\n      classification = 'upcoming';\n      if (daysUntilDue <= UPCOMING_DAYS_BEFORE_DUE) reminderStage = `upcoming_${UPCOMING_DAYS_BEFORE_DUE}_days`;\n      else actionReason = 'outside_upcoming_interval';\n    } else if (daysUntilDue === 0) {\n      classification = 'due';\n      reminderStage = 'due_today';\n    } else {\n      classification = 'overdue';\n      const daysOverdue = Math.abs(daysUntilDue);\n      reminderStage = [...OVERDUE_STAGES].reverse().find(stage => daysOverdue >= stage.minimumDaysOverdue)?.stage ?? '';\n      if (!reminderStage) actionReason = 'before_first_overdue_interval';\n    }\n\n    if (reminderStage) {\n      outputPath = 'ready_for_review';\n      actionReason = 'reminder_stage_eligible';\n    } else {\n      outputPath = 'no_action_required';\n    }\n  }\n\n  if (reviewReasons.length > 0) {\n    outputPath = 'manual_review';\n    actionReason = [...new Set(reviewReasons)].join(',');\n    reminderStage = '';\n  }\n}\n\nconst preparedAt = new Date().toISOString();\nconst draft = reminderStage ? {\n  reminderStage,\n  recipient: { customerId, customerName, email, phone },\n  subject: `Payment reminder review: invoice ${invoiceId}`,\n  title: `Review ${reminderStage} for ${invoiceId}`,\n  messageVariables: { invoiceId, customerName, currency, totalAmount, paidAmount, outstandingAmount, dueDate },\n  invoice: { invoiceId, currency, totalAmount, paidAmount, outstandingAmount, dueDate, paymentStatus, disputed },\n  reviewStatus: 'pending_manual_approval',\n} : null;\n\nreturn { json: { invoiceId, customerId, customerName, email, phone, currency, totalAmount, paidAmount, outstandingAmount, dueDate, paymentStatus, disputed, sourceUpdatedAt, classification, reminderStage, outputPath, actionReason, preparedAt, draft } };"
+        "jsCode": "const UPCOMING_DAYS_BEFORE_DUE = 3;\nconst OVERDUE_STAGES = [\n  { stage: 'overdue_3_days', minimumDaysOverdue: 3 },\n  { stage: 'overdue_7_days', minimumDaysOverdue: 7 },\n  { stage: 'overdue_14_days', minimumDaysOverdue: 14 },\n];\nconst BUSINESS_TIME_ZONE = 'UTC';\nconst EVALUATION_DATE = ''; // Optional YYYY-MM-DD test override; blank uses the configured business time zone.\nconst AMOUNT_TOLERANCE = 0.01;\n\nconst raw = $json ?? {};\nconst text = (value, max = 200) => String(value ?? '').trim().replace(/\\s+/g, ' ').slice(0, max);\nconst fullText = value => String(value ?? '').trim().replace(/\\s+/g, ' ');\nconst parseDateOnly = value => {\n  if (!/^\\d{4}-\\d{2}-\\d{2}$/.test(value)) return null;\n  const date = new Date(value + 'T00:00:00.000Z');\n  return Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== value ? null : date;\n};\nconst businessDate = timeZone => {\n  const parts = new Intl.DateTimeFormat('en-US', {\n    timeZone,\n    year: 'numeric',\n    month: '2-digit',\n    day: '2-digit',\n  }).formatToParts(new Date());\n  const part = type => parts.find(value => value.type === type)?.value;\n  return part('year') + '-' + part('month') + '-' + part('day');\n};\n\nlet currentBusinessDate;\ntry {\n  currentBusinessDate = businessDate(BUSINESS_TIME_ZONE);\n} catch {\n  return { json: { classification: 'invalid', reminderStage: '', outputPath: 'workflow_failure', actionReason: 'business_time_zone_invalid', failedOperation: 'business_date_configuration', reviewStatus: 'manual_review', draft: null, deliveryEnabled: false } };\n}\n\nconst invoiceId = text(raw.invoiceId);\nconst customerId = text(raw.customer?.id);\nconst customerName = text(raw.customer?.name);\nconst email = text(raw.customer?.email, 320).toLowerCase();\nconst phoneDigits = text(raw.customer?.phone, 50).replace(/\\D/g, '');\nconst phone = phoneDigits.startsWith('00') ? '+' + phoneDigits.slice(2) : phoneDigits ? '+' + phoneDigits : '';\nconst currency = fullText(raw.currency).toUpperCase();\nconst paymentStatus = text(raw.paymentStatus, 40).toLowerCase().replace(/[ -]+/g, '_');\nconst disputed = typeof raw.disputed === 'boolean' ? raw.disputed : null;\nconst totalAmount = typeof raw.totalAmount === 'number' && Number.isFinite(raw.totalAmount) ? raw.totalAmount : null;\nconst paidAmount = typeof raw.paidAmount === 'number' && Number.isFinite(raw.paidAmount) ? raw.paidAmount : null;\nconst outstandingAmount = typeof raw.outstandingAmount === 'number' && Number.isFinite(raw.outstandingAmount) ? raw.outstandingAmount : null;\nconst dueDate = fullText(raw.dueDate);\nconst errors = [];\nconst reviewReasons = [];\n\nconst updatedAtPresent = Object.prototype.hasOwnProperty.call(raw, 'updatedAt');\nlet sourceUpdatedAt = null;\nif (updatedAtPresent) {\n  if (typeof raw.updatedAt !== 'string' || raw.updatedAt.trim() === '') {\n    errors.push('updated_at_invalid');\n  } else {\n    const parsedUpdatedAt = new Date(raw.updatedAt.trim());\n    if (Number.isNaN(parsedUpdatedAt.getTime())) errors.push('updated_at_invalid');\n    else sourceUpdatedAt = parsedUpdatedAt.toISOString();\n  }\n}\n\nif (!invoiceId) errors.push('invoice_id_missing');\nif (!customerId || !customerName) errors.push('customer_identity_missing');\nif (!/^[A-Z]{3}$/.test(currency)) errors.push('currency_invalid');\nif (totalAmount === null) errors.push('total_amount_invalid');\nelse if (totalAmount <= 0) errors.push('total_amount_not_positive');\nif (paidAmount === null) errors.push('paid_amount_invalid');\nelse if (paidAmount < 0) errors.push('paid_amount_negative');\nif (outstandingAmount === null) errors.push('outstanding_amount_invalid');\nelse if (outstandingAmount < 0) errors.push('outstanding_amount_negative');\nif (disputed === null) errors.push('disputed_invalid');\nconst due = parseDateOnly(dueDate);\nif (!due) errors.push('due_date_invalid');\nif (!['unpaid', 'paid', 'partially_paid'].includes(paymentStatus)) errors.push('payment_status_invalid');\n\nlet classification = 'invalid';\nlet reminderStage = '';\nlet outputPath = 'invalid_record';\nlet actionReason = errors.join(',');\n\nif (errors.length === 0) {\n  const inconsistentAmount = Math.abs(totalAmount - paidAmount - outstandingAmount) > AMOUNT_TOLERANCE;\n  const paidConflict = paymentStatus === 'paid' && outstandingAmount > AMOUNT_TOLERANCE;\n  const unpaidConflict = paymentStatus === 'unpaid' && (paidAmount > AMOUNT_TOLERANCE || outstandingAmount <= AMOUNT_TOLERANCE);\n  const partialByAmount = paidAmount > AMOUNT_TOLERANCE && outstandingAmount > AMOUNT_TOLERANCE;\n\n  if (inconsistentAmount) reviewReasons.push('amounts_inconsistent');\n  if (paidConflict || unpaidConflict) reviewReasons.push('payment_state_conflict');\n  if (!email && !phone) reviewReasons.push('customer_contact_missing');\n\n  if (disputed) {\n    classification = 'disputed';\n    reviewReasons.push('invoice_disputed');\n  } else if (paymentStatus === 'partially_paid' || partialByAmount) {\n    classification = 'partially_paid';\n    reviewReasons.push('partial_payment');\n  } else if (reviewReasons.length > 0) {\n    classification = 'requiring_manual_review';\n  } else if (paymentStatus === 'paid' && outstandingAmount <= AMOUNT_TOLERANCE) {\n    classification = 'paid';\n    outputPath = 'no_action_required';\n    actionReason = 'invoice_paid';\n  } else {\n    const evaluationDate = EVALUATION_DATE || currentBusinessDate;\n    const evaluation = parseDateOnly(evaluationDate);\n    if (!evaluation) {\n      return { json: { invoiceId, classification: 'invalid', reminderStage: '', outputPath: 'workflow_failure', actionReason: 'evaluation_date_invalid', failedOperation: 'business_date_configuration', reviewStatus: 'manual_review', draft: null, deliveryEnabled: false } };\n    }\n    const daysUntilDue = Math.round((due.getTime() - evaluation.getTime()) / 86400000);\n\n    if (daysUntilDue > 0) {\n      classification = 'upcoming';\n      if (daysUntilDue <= UPCOMING_DAYS_BEFORE_DUE) reminderStage = 'upcoming_' + UPCOMING_DAYS_BEFORE_DUE + '_days';\n      else actionReason = 'outside_upcoming_interval';\n    } else if (daysUntilDue === 0) {\n      classification = 'due';\n      reminderStage = 'due_today';\n    } else {\n      classification = 'overdue';\n      const daysOverdue = Math.abs(daysUntilDue);\n      reminderStage = [...OVERDUE_STAGES].reverse().find(stage => daysOverdue >= stage.minimumDaysOverdue)?.stage ?? '';\n      if (!reminderStage) actionReason = 'before_first_overdue_interval';\n    }\n\n    if (reminderStage) {\n      outputPath = 'ready_for_review';\n      actionReason = 'reminder_stage_eligible';\n    } else {\n      outputPath = 'no_action_required';\n    }\n  }\n\n  if (reviewReasons.length > 0) {\n    outputPath = 'manual_review';\n    actionReason = [...new Set(reviewReasons)].join(',');\n    reminderStage = '';\n  }\n}\n\nconst preparedAt = new Date().toISOString();\nconst draft = reminderStage ? {\n  reminderStage,\n  recipient: { customerId, customerName, email, phone },\n  subject: 'Payment reminder review: invoice ' + invoiceId,\n  title: 'Review ' + reminderStage + ' for ' + invoiceId,\n  messageVariables: { invoiceId, customerName, currency, totalAmount, paidAmount, outstandingAmount, dueDate },\n  invoice: { invoiceId, currency, totalAmount, paidAmount, outstandingAmount, dueDate, paymentStatus, disputed },\n  reviewStatus: 'pending_manual_approval',\n} : null;\n\nreturn { json: { invoiceId, customerId, customerName, email, phone, currency, totalAmount, paidAmount, outstandingAmount, dueDate, paymentStatus, disputed, sourceUpdatedAt, businessTimeZone: BUSINESS_TIME_ZONE, classification, reminderStage, outputPath, actionReason, preparedAt, draft } };"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -148,7 +150,10 @@
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [-120, 220],
+      "position": [
+        -120,
+        220
+      ],
       "id": "5a29fa58-1cab-4b3a-ab02-ad5a253c069a",
       "name": "Prevent Batch Replays"
     },
@@ -340,6 +345,52 @@
     },
     {
       "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "return $input.all().map((item, index) => {\n  const value = item.json ?? {};\n  const draft = value.draft;\n  const historyKey = String(value.invoiceId ?? '').trim() + '::' + String(value.reminderStage ?? '').trim();\n  const valid = value.invoiceId && value.reminderStage && draft && typeof draft === 'object' && draft.recipient && draft.subject && draft.title && draft.messageVariables && draft.invoice && value.outputPath === 'ready_for_review';\n  if (!valid) {\n    return { json: { invoiceId: String(value.invoiceId ?? ''), reminderStage: String(value.reminderStage ?? ''), classification: value.classification ?? 'invalid', outputPath: 'workflow_failure', reviewStatus: 'manual_review', failedOperation: 'output_preparation', actionReason: 'ready_output_invalid', draft: null, deliveryEnabled: false }, pairedItem: { item: index } };\n  }\n  return { json: { ...value, historyKey, outputPath: 'ready_for_review', reviewStatus: 'pending_manual_approval', deliveryEnabled: false }, pairedItem: { item: index } };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1400,
+        100
+      ],
+      "id": "81bba75c-96dc-46ab-84ae-2fcf9fb3ddae",
+      "name": "Prepare Ready Output"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "afe930d8-cb18-450e-8b24-d15e145cc577",
+              "leftValue": "={{ $json.outputPath }}",
+              "rightValue": "ready_for_review",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1620,
+        100
+      ],
+      "id": "83bf175f-e493-4aae-8383-a6635fec0a5f",
+      "name": "Ready Output Valid?"
+    },
+    {
+      "parameters": {
         "resource": "row",
         "operation": "insert",
         "dataTableId": {
@@ -370,28 +421,79 @@
       "type": "n8n-nodes-base.dataTable",
       "typeVersion": 1.1,
       "position": [
-        1400,
+        1840,
         100
       ],
       "id": "16aef9d9-0d33-4124-895a-f629809bc1a9",
       "name": "Store Reminder Preparation",
-      "retryOnFail": true,
-      "maxTries": 3,
-      "waitBetweenTries": 1000
+      "onError": "continueErrorOutput"
     },
     {
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "const invoiceByKey = new Map(\n  $('Check Reminder History').all()\n    .map(item => item.json)\n    .filter(invoice => invoice.outputPath === 'ready_for_review')\n    .map(invoice => [`${invoice.invoiceId}::${invoice.reminderStage}`, invoice]),\n);\n\nreturn $input.all().map((item, index) => {\n  const row = item.json ?? {};\n  const key = `${String(row.invoice_id ?? '').trim()}::${String(row.reminder_stage ?? '').trim()}`;\n  const invoice = invoiceByKey.get(key);\n  if (!invoice) throw new Error(`No prepared invoice matches history row ${key}`);\n\n  return {\n    json: {\n      ...invoice,\n      historyRecordId: row.id ?? null,\n      outputPath: 'ready_for_review',\n      reviewStatus: 'pending_manual_approval',\n      deliveryEnabled: false,\n    },\n    pairedItem: { item: index },\n  };\n});"
+        "jsCode": "const preparedByKey = new Map(\n  $('Prepare Ready Output').all()\n    .map(item => item.json)\n    .filter(value => value.outputPath === 'ready_for_review')\n    .map(value => [value.historyKey, value]),\n);\n\nreturn $input.all().map((item, index) => {\n  const row = item.json ?? {};\n  const key = String(row.invoice_id ?? '').trim() + '::' + String(row.reminder_stage ?? '').trim();\n  const prepared = preparedByKey.get(key);\n  if (!prepared) {\n    return { json: { outputPath: 'workflow_failure', reviewStatus: 'manual_review', failedOperation: 'history_confirmation', actionReason: 'history_confirmation_failed', draft: null, deliveryEnabled: false }, pairedItem: { item: index } };\n  }\n  return { json: { ...prepared, historyRecordId: row.id ?? null }, pairedItem: { item: index } };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2060,
+        100
+      ],
+      "id": "e38fffe0-9b08-4daf-bda0-967675f7af3f",
+      "name": "Ready for Review"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const value = $json ?? {};\nreturn { json: { invoiceId: String(value.invoiceId ?? ''), reminderStage: String(value.reminderStage ?? ''), classification: value.classification ?? 'requiring_manual_review', outputPath: 'workflow_failure', reviewStatus: 'manual_review', failedOperation: 'history_table_create', actionReason: 'history_table_create_failed', draft: null, deliveryEnabled: false } };"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1400,
+        400
+      ],
+      "id": "c57a04b6-514d-476b-85ac-d219d05fd65e",
+      "name": "Format History Setup Failure"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const value = $json ?? {};\nreturn { json: { invoiceId: String(value.invoiceId ?? ''), reminderStage: String(value.reminderStage ?? ''), classification: value.classification ?? 'requiring_manual_review', outputPath: 'workflow_failure', reviewStatus: 'manual_review', failedOperation: 'history_load', actionReason: 'history_load_failed', draft: null, deliveryEnabled: false } };"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
         1620,
-        100
+        400
       ],
-      "id": "e38fffe0-9b08-4daf-bda0-967675f7af3f",
-      "name": "Ready for Review"
+      "id": "ad7fba5b-7772-42dc-bac8-cd3dc0b8ac15",
+      "name": "Format History Load Failure"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const value = $json ?? {};\nreturn { json: { invoiceId: String(value.invoiceId ?? ''), reminderStage: String(value.reminderStage ?? ''), classification: value.classification ?? 'requiring_manual_review', outputPath: 'workflow_failure', reviewStatus: 'manual_review', failedOperation: 'history_insert', actionReason: 'history_insert_failed', draft: null, deliveryEnabled: false } };"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1840,
+        400
+      ],
+      "id": "74cff20e-fb48-4a63-a0b0-1de20e0e7651",
+      "name": "Format History Insert Failure"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        2060,
+        400
+      ],
+      "id": "23f15a7c-e2d6-4609-a730-dc53b8dd91d0",
+      "name": "Workflow Failure"
     },
     {
       "parameters": {
@@ -459,9 +561,9 @@
     },
     {
       "parameters": {
-        "content": "## Return review output\n\nReturn an existing stage or store a new channel-ready draft. No delivery node is included.",
-        "height": 500,
-        "width": 540,
+        "content": "## Prepare, store, and return review output\n\nValidate each final draft before insertion. Successful writes return review output; storage errors return a safe workflow-failure item.",
+        "height": 900,
+        "width": 1000,
         "color": 7
       },
       "type": "n8n-nodes-base.stickyNote",
@@ -494,6 +596,13 @@
             "type": "main",
             "index": 0
           }
+        ],
+        [
+          {
+            "node": "Format History Setup Failure",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     },
@@ -502,6 +611,13 @@
         [
           {
             "node": "Load Fictional Invoice Samples",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Format History Load Failure",
             "type": "main",
             "index": 0
           }
@@ -617,7 +733,7 @@
         ],
         [
           {
-            "node": "Store Reminder Preparation",
+            "node": "Prepare Ready Output",
             "type": "main",
             "index": 0
           }
@@ -629,6 +745,75 @@
         [
           {
             "node": "Ready for Review",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Format History Insert Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Ready Output": {
+      "main": [
+        [
+          {
+            "node": "Ready Output Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ready Output Valid?": {
+      "main": [
+        [
+          {
+            "node": "Store Reminder Preparation",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Workflow Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format History Setup Failure": {
+      "main": [
+        [
+          {
+            "node": "Workflow Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format History Load Failure": {
+      "main": [
+        [
+          {
+            "node": "Workflow Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format History Insert Failure": {
+      "main": [
+        [
+          {
+            "node": "Workflow Failure",
             "type": "main",
             "index": 0
           }
