@@ -91,6 +91,30 @@
     },
     {
       "parameters": {
+        "resource": "row",
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "invoice_reminder_history"
+        },
+        "returnAll": true
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        -570,
+        160
+      ],
+      "id": "0a0232f5-e5eb-43a9-bb8d-17a0c86d8a51",
+      "name": "Load Reminder History",
+      "alwaysOutputData": true,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000
+    },
+    {
+      "parameters": {
         "mode": "runOnceForAllItems",
         "jsCode": "const dateFromToday = days => {\n  const date = new Date();\n  date.setUTCHours(0, 0, 0, 0);\n  date.setUTCDate(date.getUTCDate() + days);\n  return date.toISOString().slice(0, 10);\n};\n\n// Fictional records only. Replace this array or connect another credential-free input.\nconst invoices = [\n  {\n    invoiceId: 'INV-FICTION-1001',\n    customer: { id: 'CUST-FICTION-01', name: 'Northstar Demo GmbH', email: 'billing@northstar-demo.example', phone: '' },\n    currency: 'EUR',\n    totalAmount: 1200,\n    paidAmount: 0,\n    outstandingAmount: 1200,\n    dueDate: dateFromToday(2),\n    paymentStatus: 'unpaid',\n    disputed: false,\n    updatedAt: new Date().toISOString(),\n  },\n  {\n    invoiceId: 'INV-FICTION-1002',\n    customer: { id: 'CUST-FICTION-02', name: 'Riverbank Sample SAS', email: '', phone: '+33 1 00 00 00 00' },\n    currency: 'EUR',\n    totalAmount: 500,\n    paidAmount: 0,\n    outstandingAmount: 500,\n    dueDate: dateFromToday(-8),\n    paymentStatus: 'unpaid',\n    disputed: false,\n    updatedAt: new Date().toISOString(),\n  },\n  {\n    invoiceId: 'INV-FICTION-1003',\n    customer: { id: 'CUST-FICTION-03', name: 'Orchard Example Ltd', email: 'accounts@orchard-example.example', phone: '' },\n    currency: 'GBP',\n    totalAmount: 800,\n    paidAmount: 800,\n    outstandingAmount: 0,\n    dueDate: dateFromToday(-5),\n    paymentStatus: 'paid',\n    disputed: false,\n    updatedAt: new Date().toISOString(),\n  },\n];\n\nreturn invoices.map(invoice => ({ json: invoice }));"
       },
@@ -127,6 +151,20 @@
       "position": [-120, 220],
       "id": "5a29fa58-1cab-4b3a-ab02-ad5a253c069a",
       "name": "Prevent Batch Replays"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const historyByKey = new Map();\n\nfor (const item of $('Load Reminder History').all()) {\n  const row = item.json ?? {};\n  const invoiceId = String(row.invoice_id ?? '').trim();\n  const reminderStage = String(row.reminder_stage ?? '').trim();\n  if (!invoiceId || !reminderStage || row.id === undefined || row.id === null) continue;\n\n  const key = `${invoiceId}::${reminderStage}`;\n  const current = historyByKey.get(key);\n  if (!current || String(row.prepared_at ?? '') > String(current.prepared_at ?? '')) historyByKey.set(key, row);\n}\n\nreturn $input.all().map((item, index) => {\n  const invoice = item.json;\n  if (invoice.outputPath !== 'ready_for_review') return item;\n\n  const key = `${invoice.invoiceId}::${invoice.reminderStage}`;\n  const history = historyByKey.get(key);\n  if (!history) return item;\n\n  return {\n    json: {\n      ...invoice,\n      outputPath: 'already_prepared',\n      actionReason: 'reminder_stage_already_prepared',\n      reviewStatus: 'already_prepared',\n      historyRecordId: history.id,\n      previousPreparedAt: history.prepared_at ?? null,\n    },\n    pairedItem: { item: index },\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        60,
+        220
+      ],
+      "id": "6d4044dc-2a11-4507-99ad-57eb15eac5e9",
+      "name": "Check Reminder History"
     },
     {
       "parameters": {
@@ -259,60 +297,6 @@
     },
     {
       "parameters": {
-        "resource": "row",
-        "operation": "get",
-        "dataTableId": {
-          "__rl": true,
-          "mode": "name",
-          "value": "invoice_reminder_history"
-        },
-        "matchType": "allConditions",
-        "filters": {
-          "conditions": [
-            {
-              "keyName": "invoice_id",
-              "condition": "eq",
-              "keyValue": "={{ $json.invoiceId }}"
-            },
-            {
-              "keyName": "reminder_stage",
-              "condition": "eq",
-              "keyValue": "={{ $json.reminderStage }}"
-            }
-          ]
-        },
-        "returnAll": false,
-        "limit": 1
-      },
-      "type": "n8n-nodes-base.dataTable",
-      "typeVersion": 1.1,
-      "position": [
-        740,
-        20
-      ],
-      "id": "0a0232f5-e5eb-43a9-bb8d-17a0c86d8a51",
-      "name": "Find Exact Reminder Stage",
-      "alwaysOutputData": true,
-      "retryOnFail": true,
-      "maxTries": 3,
-      "waitBetweenTries": 1000
-    },
-    {
-      "parameters": {
-        "mode": "runOnceForEachItem",
-        "jsCode": "const invoice = $('Validate Normalize and Classify').item.json;\nconst history = $json ?? {};\nconst alreadyPrepared = history.id !== undefined && history.id !== null;\nreturn { json: { ...invoice, outputPath: alreadyPrepared ? 'already_prepared' : invoice.outputPath, reviewStatus: alreadyPrepared ? 'already_prepared' : 'pending_manual_approval', historyRecordId: alreadyPrepared ? history.id : null, previousPreparedAt: alreadyPrepared ? history.prepared_at : null } };"
-      },
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        960,
-        20
-      ],
-      "id": "6d4044dc-2a11-4507-99ad-57eb15eac5e9",
-      "name": "Check Reminder History"
-    },
-    {
-      "parameters": {
         "conditions": {
           "options": {
             "caseSensitive": true,
@@ -397,8 +381,8 @@
     },
     {
       "parameters": {
-        "mode": "runOnceForEachItem",
-        "jsCode": "const invoice = $('Check Reminder History').item.json;\nreturn { json: { ...invoice, historyRecordId: $json.id ?? null, outputPath: 'ready_for_review', reviewStatus: 'pending_manual_approval', deliveryEnabled: false } };"
+        "mode": "runOnceForAllItems",
+        "jsCode": "const invoiceByKey = new Map(\n  $('Check Reminder History').all()\n    .map(item => item.json)\n    .filter(invoice => invoice.outputPath === 'ready_for_review')\n    .map(invoice => [`${invoice.invoiceId}::${invoice.reminderStage}`, invoice]),\n);\n\nreturn $input.all().map((item, index) => {\n  const row = item.json ?? {};\n  const key = `${String(row.invoice_id ?? '').trim()}::${String(row.reminder_stage ?? '').trim()}`;\n  const invoice = invoiceByKey.get(key);\n  if (!invoice) throw new Error(`No prepared invoice matches history row ${key}`);\n\n  return {\n    json: {\n      ...invoice,\n      historyRecordId: row.id ?? null,\n      outputPath: 'ready_for_review',\n      reviewStatus: 'pending_manual_approval',\n      deliveryEnabled: false,\n    },\n    pairedItem: { item: index },\n  };\n});"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -428,7 +412,7 @@
     {
       "parameters": {
         "content": "## Prepare safe input\n\nCreate the local history table and load fictional records from a Manual Trigger.",
-        "height": 400,
+        "height": 500,
         "width": 760,
         "color": 7
       },
@@ -460,7 +444,7 @@
     {
       "parameters": {
         "content": "## Prevent repeated drafts\n\nCheck the exact invoice and stage before preparing a new history row.",
-        "height": 400,
+        "height": 500,
         "width": 620,
         "color": 7
       },
@@ -506,6 +490,17 @@
       "main": [
         [
           {
+            "node": "Load Reminder History",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Reminder History": {
+      "main": [
+        [
+          {
             "node": "Load Fictional Invoice Samples",
             "type": "main",
             "index": 0
@@ -536,6 +531,17 @@
       ]
     },
     "Prevent Batch Replays": {
+      "main": [
+        [
+          {
+            "node": "Check Reminder History",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Reminder History": {
       "main": [
         [
           {
@@ -591,28 +597,6 @@
             "index": 0
           }
         ],
-        [
-          {
-            "node": "Find Exact Reminder Stage",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Find Exact Reminder Stage": {
-      "main": [
-        [
-          {
-            "node": "Check Reminder History",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Check Reminder History": {
-      "main": [
         [
           {
             "node": "Already Prepared?",

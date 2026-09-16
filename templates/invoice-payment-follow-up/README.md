@@ -17,9 +17,10 @@ A credential-free n8n workflow that validates invoice records, classifies paymen
 4. Classifies each record as `upcoming`, `due`, `overdue`, `paid`, `partially_paid`, `disputed`, `invalid`, or `requiring_manual_review`.
 5. Assigns a configurable reminder stage to eligible records.
 6. Marks repeated invoice-stage pairs within one execution as already prepared.
-7. Checks the invoice ID and reminder stage against prior preparations.
+7. Loads reminder history once and matches every eligible invoice by invoice ID and reminder stage.
 8. Stores a new audit row only when that exact stage has not been prepared.
-9. Returns one of five explicit output paths: `ready_for_review`, `no_action_required`, `manual_review`, `invalid_record`, or `already_prepared`.
+9. Matches inserted rows back to drafts with the same stable business key.
+10. Returns one of five explicit output paths: `ready_for_review`, `no_action_required`, `manual_review`, `invalid_record`, or `already_prepared`.
 
 The workflow has no delivery node. It does not send email, WhatsApp messages, or other external communications.
 
@@ -67,7 +68,7 @@ The workflow creates `invoice_reminder_history` with these columns:
 | `prepared_at` | date | UTC timestamp when the draft was prepared. |
 | `source_updated_at` | date | Timestamp supplied by the source record. |
 
-Rows are append-only by reminder stage. The workflow performs an exact lookup using `invoice_id` and `reminder_stage`; it does not scan the full table in Code nodes.
+Rows are append-only by reminder stage. **Load Reminder History** reads the table once per execution. **Check Reminder History** builds an in-memory map keyed by `invoice_id + reminder_stage`, then checks every eligible invoice without relying on item position.
 
 ## Input contract
 
@@ -201,7 +202,7 @@ Missing core identifiers, an invalid currency or amount, an invalid due date, or
 
 ## Failure handling
 
-Data Table creation, lookup, and insertion retry at most three times with a one-second wait. If all attempts fail, n8n stops the execution and records the failed node. The history row is written only after validation, classification, and the exact-stage lookup succeed.
+Data Table creation, history loading, and insertion retry at most three times with a one-second wait. If all attempts fail, n8n stops the execution and records the failed node. The history row is written only after validation, classification, and history matching succeed.
 
 The workflow has no loop, schedule, webhook, or outbound request. Each manual execution processes only the finite array returned by **Load Fictional Invoice Samples**.
 
@@ -216,7 +217,9 @@ The workflow has no loop, schedule, webhook, or outbound request. Each manual ex
 
 ## Production limitations
 
-n8n Data Tables do not provide database-level uniqueness for `invoice_id + reminder_stage`, and the lookup and insert are separate operations. Concurrent executions can both pass the lookup and create duplicate history rows. Use a transactional database with a unique constraint before using this pattern for concurrent or business-critical processing.
+The workflow scans `invoice_reminder_history` once per execution. This keeps low-volume batches intact, but lookup cost grows with the table. Use an indexed database lookup when history volume makes a full scan too slow.
+
+n8n Data Tables do not provide database-level uniqueness for `invoice_id + reminder_stage`, and history loading and insertion are separate operations. Concurrent executions can both miss the same stage and create duplicate history rows. Use a transactional database with a unique constraint before using this pattern for concurrent or business-critical processing.
 
 The template does not reconcile payments, calculate taxes or fees, interpret credit notes, resolve disputes, approve content, or verify that a contact is authorized. It has not been tested against a specific ERP, CRM, email provider, or WhatsApp service.
 
@@ -239,6 +242,19 @@ Keep the workflow inactive. For repeatable dates, set `EVALUATION_DATE` in **Val
 13. **Multiple invoices in one execution:** Load three records in the same array: one valid upcoming invoice, one paid invoice, and one disputed invoice, each with a unique ID. Expected: one `ready_for_review`, one `no_action_required`, and one `manual_review` result. Only the upcoming invoice creates a history row, and every output retains its own invoice and customer fields.
 
 After each test, inspect the final node output and the Data Table row count. Do not add or enable a delivery node during these tests.
+
+## Batch-history regression plan
+
+Keep `EVALUATION_DATE` set to `2030-06-20`. Use unique fictional IDs unless the test calls for a duplicate. Compare results by `invoiceId + reminderStage`, not by output order.
+
+1. **Two eligible invoices:** Load one invoice due `2030-06-22` and another due `2030-06-20`. With an empty history table, expect two `ready_for_review` results and two matching history rows.
+2. **Eligible and paid:** Load the upcoming invoice from test 1 and a paid invoice with total `100`, paid `100`, and outstanding `0`. Expect one `ready_for_review`, one `no_action_required`, and one new history row.
+3. **Existing and new:** Seed history with the first invoice's `upcoming_3_days` row, then load that invoice and a different eligible invoice. Expect `already_prepared` for the seeded key, `ready_for_review` for the new key, and one new row.
+4. **Duplicate in one execution:** Load the same eligible invoice twice. Expect the first item to reach `ready_for_review`, the second to reach `already_prepared` with `actionReason=duplicate_in_execution`, and one history row.
+5. **Reordered inputs:** Reverse the inputs from test 3. Expect the same result for each invoice ID and stage as before the reorder.
+6. **Empty history:** Clear the table and load three eligible invoices. Expect three `ready_for_review` results and three new history rows.
+7. **Multiple existing rows:** Seed at least three history rows, including two rows for one invoice-stage key with different `prepared_at` values. Load matching and non-matching invoices. Expect every matching key to reach `already_prepared`, the newest matching row ID to be reported for the duplicate key, and every new key to reach `ready_for_review`.
+8. **No cross-item contamination:** Load eligible, paid, disputed, invalid-date, and contact-missing invoices together, then reorder them and run again with a cleared table. Expect each invoice ID to retain its own classification, reason, recipient, draft, and output path in both orders.
 
 ## Connecting a delivery channel later
 
