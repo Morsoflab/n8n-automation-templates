@@ -16,7 +16,7 @@ A credential-free n8n workflow that validates invoice records, classifies paymen
 3. Normalizes invoice, customer, contact, currency, amount, status, and date fields.
 4. Classifies each record as `upcoming`, `due`, `overdue`, `paid`, `partially_paid`, `disputed`, `invalid`, or `requiring_manual_review`.
 5. Assigns a configurable reminder stage to eligible records.
-6. Marks repeated invoice-stage pairs within one execution as already prepared.
+6. Groups repeated invoice-stage pairs so each new batch key is inserted at most once.
 7. Loads reminder history once and matches every eligible invoice by invoice ID and reminder stage.
 8. Constructs and validates the complete review output before attempting an audit write.
 9. Stores a new audit row only when that exact stage has not been prepared.
@@ -46,7 +46,7 @@ The first lines of **Validate Normalize and Classify** contain the supported set
 | `OVERDUE_STAGES` | 3, 7, and 14 days | Select the latest eligible overdue stage. Keep entries ordered from earliest to latest. |
 | `BUSINESS_TIME_ZONE` | `UTC` | IANA time-zone name used to select the current business calendar date, such as `Europe/Berlin`. An invalid value returns `workflow_failure`. |
 | `EVALUATION_DATE` | blank | Use the current date in `BUSINESS_TIME_ZONE`. Set a fictional `YYYY-MM-DD` date for repeatable tests. |
-| `AMOUNT_TOLERANCE` | `0.01` | Allowed difference when checking `totalAmount - paidAmount = outstandingAmount`. |
+| `AMOUNT_TOLERANCE` | `0.01` | Allowed arithmetic difference when checking `totalAmount - paidAmount = outstandingAmount`. It does not decide whether an amount is positive. |
 
 Invoice due dates are interpreted as calendar dates in `BUSINESS_TIME_ZONE`. Date-only comparisons remain deterministic because both the selected business date and due date are compared as calendar-day ordinals, not local timestamps.
 
@@ -98,9 +98,11 @@ Each item must have this shape:
 
 Required fields are `invoiceId`, `customer.id`, `customer.name`, `currency`, all three amount fields, `dueDate`, `paymentStatus`, and `disputed`. `totalAmount`, `paidAmount`, and `outstandingAmount` must be finite JSON numbers; strings, blanks, `null`, `NaN`, and infinite values are invalid. `totalAmount` must be greater than zero, while paid and outstanding amounts must be zero or greater. `disputed` must be a JSON boolean. Currency is trimmed and uppercased, then must contain exactly three ASCII letters; for example, `eur` becomes `EUR`, while `EURO` is invalid.
 
-`updatedAt` is optional. When supplied, it must be a nonblank, valid timestamp and is normalized to ISO 8601. An omitted value is stored as `null`; a supplied `null` or malformed value follows `invalid_record`. At least one of `customer.email` or `customer.phone` is required before a draft can be prepared. `paymentStatus` accepts `unpaid`, `paid`, or `partially_paid`.
+`updatedAt` is optional. When supplied, it must be a calendar-valid ISO 8601 timestamp with `Z` or a numeric offset and is normalized to UTC. An omitted value is stored as `null`; a supplied `null`, impossible calendar date, or malformed value follows `invalid_record`. At least one of `customer.email` or `customer.phone` is required before a draft can be prepared. `paymentStatus` accepts `unpaid`, `paid`, or `partially_paid`.
 
-Use a stable invoice ID. Reusing an ID for a different source invoice can suppress a reminder stage.
+Use a stable invoice ID no longer than 200 characters. Longer IDs are rejected instead of truncated, so distinct identifiers cannot collapse into the same replay key. Reusing an ID for a different source invoice can suppress a reminder stage.
+
+Amounts must already use the currency's smallest supported accounting precision. The workflow uses `AMOUNT_TOLERANCE` only to reconcile `totalAmount - paidAmount - outstandingAmount`. Any positive paid amount counts as payment, and any positive outstanding balance on a paid invoice is a conflict.
 
 ## Output contract
 
@@ -209,7 +211,9 @@ Missing core identifiers, a missing or non-boolean dispute state, an invalid cur
 
 Data Table creation and history loading retry at most three times with a one-second wait because those reads and setup operations are safe to repeat. After exhaustion, they return `workflow_failure` with `failedOperation` and a safe `actionReason`. The output omits internal errors and stack traces.
 
-The complete `ready_for_review` output is constructed and validated before insertion. The non-idempotent history insert makes one attempt and has no automatic retry because Data Tables cannot enforce uniqueness for the business key. A failed insert returns `workflow_failure` and does not produce a successful prepared output. The post-insert step reuses the prebuilt output and correlates only by `invoiceId + reminderStage`, so filtered or reordered items are not matched by array position.
+Configuration failures keep their original reason, operation, and normalized invoice context, then route directly to **Workflow Failure** without entering reminder preparation or history insertion.
+
+The complete `ready_for_review` output is constructed and validated before insertion. Same-batch items are grouped by `invoiceId + reminderStage`, and only the first item for a new key is sent to the non-idempotent insert. That insert makes one attempt and has no automatic retry because Data Tables cannot enforce uniqueness for the business key. After success, the primary item returns `ready_for_review` and later group members return `already_prepared` with the stored row ID. After failure, every group member returns `workflow_failure`; none is reported as prepared. Correlation never depends on array position.
 
 The workflow has no loop, schedule, webhook, or outbound request. Each manual execution processes only the finite array returned by **Load Fictional Invoice Samples**.
 
@@ -247,7 +251,7 @@ Keep the workflow inactive. For repeatable dates, set `EVALUATION_DATE` in **Val
 9. **Missing contact details:** Set both email and phone to empty strings. Expected: `classification=requiring_manual_review`, `outputPath=manual_review`, `actionReason` containing `customer_contact_missing`, and no history row.
 10. **Invalid due date:** Use `2030-02-30`. Expected: `classification=invalid`, `outputPath=invalid_record`, `actionReason` containing `due_date_invalid`, and no history row.
 11. **Inconsistent amounts:** Use total `100`, paid `20`, and outstanding `90`. Expected: `classification=partially_paid`, `outputPath=manual_review`, `actionReason` containing `amounts_inconsistent`, and no history row.
-12. **Duplicate or replayed input:** Put the same eligible record into the input array twice, then run the resulting record again in a second execution without changing its invoice ID, due date, or stage. Expected: the first item is `ready_for_review`; the repeated item and later replay are `already_prepared`; one history row exists for that invoice and stage.
+12. **Duplicate or replayed input:** Put the same eligible record into the input array twice, then run the resulting record again in a second execution without changing its invoice ID, due date, or stage. Expected after a successful insert: the first item is `ready_for_review`; the repeated item and later replay are `already_prepared` with the actual stored row ID; one history row exists for that invoice and stage. If the insert fails, both same-batch items return `workflow_failure` and no item returns `already_prepared`.
 13. **Multiple invoices in one execution:** Load three records in the same array: one valid upcoming invoice, one paid invoice, and one disputed invoice, each with a unique ID. Expected: one `ready_for_review`, one `no_action_required`, and one `manual_review` result. Only the upcoming invoice creates a history row, and every output retains its own invoice and customer fields.
 
 After each test, inspect the final node output and the Data Table row count. Do not add or enable a delivery node during these tests.
@@ -259,7 +263,7 @@ Keep `EVALUATION_DATE` set to `2030-06-20`. Use unique fictional IDs unless the 
 1. **Two eligible invoices:** Load one invoice due `2030-06-22` and another due `2030-06-20`. With an empty history table, expect two `ready_for_review` results and two matching history rows.
 2. **Eligible and paid:** Load the upcoming invoice from test 1 and a paid invoice with total `100`, paid `100`, and outstanding `0`. Expect one `ready_for_review`, one `no_action_required`, and one new history row.
 3. **Existing and new:** Seed history with the first invoice's `upcoming_3_days` row, then load that invoice and a different eligible invoice. Expect `already_prepared` for the seeded key, `ready_for_review` for the new key, and one new row.
-4. **Duplicate in one execution:** Load the same eligible invoice twice. Expect the first item to reach `ready_for_review`, the second to reach `already_prepared` with `actionReason=duplicate_in_execution`, and one history row.
+4. **Duplicate in one execution:** Load the same eligible invoice twice. On successful insertion, expect the first item to reach `ready_for_review`, the second to reach `already_prepared` with `actionReason=duplicate_in_execution`, both to reference the stored row ID, and only one history row. Simulate insertion failure and expect both items to return `workflow_failure`, with no prepared result or history row.
 5. **Reordered inputs:** Reverse the inputs from test 3. Expect the same result for each invoice ID and stage as before the reorder.
 6. **Empty history:** Clear the table and load three eligible invoices. Expect three `ready_for_review` results and three new history rows.
 7. **Multiple existing rows:** Seed at least three history rows, including two rows for one invoice-stage key with different `prepared_at` values. Load matching and non-matching invoices. Expect every matching key to reach `already_prepared`, the newest matching row ID to be reported for the duplicate key, and every new key to reach `ready_for_review`.
@@ -267,7 +271,7 @@ Keep `EVALUATION_DATE` set to `2030-06-20`. Use unique fictional IDs unless the 
 
 ## Review regression checks
 
-The deterministic static harness used for this revision covers these boundaries against the workflow's embedded Code nodes and node settings:
+The deterministic static harness used for this revision covers these boundaries against the workflow's embedded Code nodes, connections, and node settings:
 
 1. Missing, `null`, blank-string, and numeric-string amounts each return `invalid_record`.
 2. A zero `totalAmount` returns `invalid_record`; negative paid or outstanding amounts are also rejected.
@@ -278,6 +282,10 @@ The deterministic static harness used for this revision covers these boundaries 
 7. Simulated exhausted history loading and failed insertion return structured `workflow_failure` outputs without internal error text.
 8. A failed insert does not produce a successful prepared result or a simulated history record.
 9. The workflow contains no ambiguous `.item` expressions and no external communication nodes.
+10. Invalid business time-zone and evaluation-date settings preserve their original failure metadata and safe normalized invoice context, bypass reminder preparation, and create no history row.
+11. Payment-state checks cover `0`, `0.001`, `0.01`, and normal positive values independently from arithmetic reconciliation inside and outside tolerance.
+12. Same-batch duplicates use one insert. Successful insertion returns one review item plus stored-ID duplicate results; failed insertion returns failures for the whole group and no prepared result.
+13. Impossible calendar timestamps and invoice IDs longer than 200 characters return `invalid_record`.
 
 For manual failure tests, temporarily point **Load Reminder History** at a nonexistent table and confirm `failedOperation=history_load`; restore it, then temporarily make **Store Reminder Preparation** fail and confirm `failedOperation=history_insert`. In both cases expect `outputPath=workflow_failure`, `reviewStatus=manual_review`, `draft=null`, and no successful prepared output. Restore the original node configuration after each test.
 
