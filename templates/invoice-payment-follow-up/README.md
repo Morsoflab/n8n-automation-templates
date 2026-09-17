@@ -308,6 +308,13 @@ Commit `ac21c15a49d5e29942719ca60351e5c8b890f349` was verified on self-hosted n8
 - With empty history, `INV-FICTION-1001::upcoming_3_days` and `INV-FICTION-1002::overdue_7_days` returned complete `ready_for_review` drafts. They created history rows 5 and 6, and the final row count was exactly two.
 - An unchanged replay returned `already_prepared` with the same history IDs and matching `previousPreparedAt` values. It created no rows, leaving the table at exactly two rows.
 
+### Final verification for `5477028`
+
+Commit `5477028bf400b31609676b9f4c81f71cbe4c4917` was verified on self-hosted n8n 2.37.9 with the workflow inactive, no external delivery nodes, the `invoice_reminder_history` Data Table, and `BUSINESS_TIME_ZONE=UTC`.
+
+- With empty history, `INV-FICTION-1001::upcoming_3_days` returned a complete `ready_for_review` draft with history row 1. `INV-FICTION-1002::overdue_7_days` returned a complete `ready_for_review` draft with row 2. Both outputs had `deliveryEnabled=false`, and the table contained exactly two rows.
+- An unchanged replay returned `already_prepared` with history rows 1 and 2. Both `previousPreparedAt` values matched the first execution, and the table remained at exactly two rows.
+
 ## Connecting a delivery channel later
 
 Keep **Ready for Review** as the preparation boundary. Add a separate human approval step after it, then connect the approved branch to an email, CRM, ERP, or WhatsApp node. Map only fields from `draft.recipient`, `draft.subject`, `draft.title`, and `draft.messageVariables`.
