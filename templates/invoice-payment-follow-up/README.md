@@ -293,6 +293,13 @@ These results were recorded on self-hosted n8n 2.37.9 with the workflow inactive
 
 The first imported version dropped later eligible invoices because a Data Table lookup used a global limit of one. Its ambiguous `.item` references also failed with `Multiple matches`. Commit `5e186f2549a844a49c913b0044e7b5b4bf151838` replaced that path with stable invoice ID and reminder-stage correlation. The live tests confirmed that two eligible invoices survive one execution, empty history works, replay protection persists across executions, and existing and new reminders can share a batch.
 
+### Final verification for `ac21c15`
+
+Commit `ac21c15a49d5e29942719ca60351e5c8b890f349` was verified on self-hosted n8n 2.37.9 with the workflow inactive, no credentials or delivery nodes, the `invoice_reminder_history` Data Table, and `BUSINESS_TIME_ZONE=UTC`.
+
+- With empty history, `INV-FICTION-1001::upcoming_3_days` and `INV-FICTION-1002::overdue_7_days` returned complete `ready_for_review` drafts. They created history rows 5 and 6, and the final row count was exactly two.
+- An unchanged replay returned `already_prepared` with the same history IDs and matching `previousPreparedAt` values. It created no rows, leaving the table at exactly two rows.
+
 ## Connecting a delivery channel later
 
 Keep **Ready for Review** as the preparation boundary. Add a separate human approval step after it, then connect the approved branch to an email, CRM, ERP, or WhatsApp node. Map only fields from `draft.recipient`, `draft.subject`, `draft.title`, and `draft.messageVariables`.
