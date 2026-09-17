@@ -132,7 +132,7 @@
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "const UPCOMING_DAYS_BEFORE_DUE = 3;\nconst OVERDUE_STAGES = [\n  { stage: 'overdue_3_days', minimumDaysOverdue: 3 },\n  { stage: 'overdue_7_days', minimumDaysOverdue: 7 },\n  { stage: 'overdue_14_days', minimumDaysOverdue: 14 },\n];\nconst BUSINESS_TIME_ZONE = 'UTC';\nconst EVALUATION_DATE = ''; // Optional YYYY-MM-DD test override; blank uses the configured business time zone.\nconst AMOUNT_TOLERANCE = 0.01; // Reconciliation only; never used to decide whether an amount is positive.\n\nconst raw = $json ?? {};\nconst fullText = value => String(value ?? '').trim().replace(/\\s+/g, ' ');\nconst limitedText = (value, max) => fullText(value).slice(0, max);\nconst parseDateOnly = value => {\n  if (!/^\\d{4}-\\d{2}-\\d{2}$/.test(value)) return null;\n  const date = new Date(value + 'T00:00:00.000Z');\n  return Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== value ? null : date;\n};\nconst parseTimestamp = value => {\n  const match = /^(\\d{4}-\\d{2}-\\d{2})T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d{1,9})?(?:Z|[+-](?:[01]\\d|2[0-3]):[0-5]\\d)$/.exec(value);\n  if (!match || !parseDateOnly(match[1])) return null;\n  const date = new Date(value);\n  return Number.isNaN(date.getTime()) ? null : date.toISOString();\n};\nconst businessDate = timeZone => {\n  const parts = new Intl.DateTimeFormat('en-US', {\n    timeZone,\n    year: 'numeric',\n    month: '2-digit',\n    day: '2-digit',\n  }).formatToParts(new Date());\n  const part = type => parts.find(value => value.type === type)?.value;\n  return part('year') + '-' + part('month') + '-' + part('day');\n};\n\nconst invoiceIdInput = fullText(raw.invoiceId);\nconst invoiceId = invoiceIdInput.length <= 200 ? invoiceIdInput : '';\nconst customerId = limitedText(raw.customer?.id, 200);\nconst customerName = limitedText(raw.customer?.name, 200);\nconst email = limitedText(raw.customer?.email, 320).toLowerCase();\nconst phoneDigits = limitedText(raw.customer?.phone, 50).replace(/\\D/g, '');\nconst phone = phoneDigits.startsWith('00') ? '+' + phoneDigits.slice(2) : phoneDigits ? '+' + phoneDigits : '';\nconst currencyInput = fullText(raw.currency).toUpperCase();\nconst currency = currencyInput.length <= 16 ? currencyInput : '';\nconst paymentStatus = limitedText(raw.paymentStatus, 40).toLowerCase().replace(/[ -]+/g, '_');\nconst disputed = typeof raw.disputed === 'boolean' ? raw.disputed : null;\nconst totalAmount = typeof raw.totalAmount === 'number' && Number.isFinite(raw.totalAmount) ? raw.totalAmount : null;\nconst paidAmount = typeof raw.paidAmount === 'number' && Number.isFinite(raw.paidAmount) ? raw.paidAmount : null;\nconst outstandingAmount = typeof raw.outstandingAmount === 'number' && Number.isFinite(raw.outstandingAmount) ? raw.outstandingAmount : null;\nconst dueDate = limitedText(raw.dueDate, 40);\nconst preparedAt = new Date().toISOString();\nconst errors = [];\nconst reviewReasons = [];\n\nconst updatedAtPresent = Object.prototype.hasOwnProperty.call(raw, 'updatedAt');\nlet sourceUpdatedAt = null;\nif (updatedAtPresent) {\n  if (typeof raw.updatedAt !== 'string' || raw.updatedAt.trim() === '') errors.push('updated_at_invalid');\n  else {\n    sourceUpdatedAt = parseTimestamp(raw.updatedAt.trim());\n    if (!sourceUpdatedAt) errors.push('updated_at_invalid');\n  }\n}\n\nconst normalizedContext = {\n  invoiceId,\n  customerId,\n  customerName,\n  email,\n  phone,\n  currency,\n  totalAmount,\n  paidAmount,\n  outstandingAmount,\n  dueDate,\n  paymentStatus,\n  disputed,\n  sourceUpdatedAt,\n  businessTimeZone: BUSINESS_TIME_ZONE,\n  preparedAt,\n};\nconst configurationFailure = actionReason => ({\n  json: {\n    ...normalizedContext,\n    classification: 'invalid',\n    reminderStage: '',\n    outputPath: 'workflow_failure',\n    actionReason,\n    failedOperation: 'business_date_configuration',\n    reviewStatus: 'manual_review',\n    draft: null,\n    deliveryEnabled: false,\n  },\n});\n\nlet currentBusinessDate;\ntry {\n  currentBusinessDate = businessDate(BUSINESS_TIME_ZONE);\n} catch {\n  return configurationFailure('business_time_zone_invalid');\n}\n\nif (!invoiceIdInput) errors.push('invoice_id_missing');\nelse if (invoiceIdInput.length > 200) errors.push('invoice_id_too_long');\nif (!customerId || !customerName) errors.push('customer_identity_missing');\nif (!/^[A-Z]{3}$/.test(currencyInput)) errors.push('currency_invalid');\nif (totalAmount === null) errors.push('total_amount_invalid');\nelse if (totalAmount <= 0) errors.push('total_amount_not_positive');\nif (paidAmount === null) errors.push('paid_amount_invalid');\nelse if (paidAmount < 0) errors.push('paid_amount_negative');\nif (outstandingAmount === null) errors.push('outstanding_amount_invalid');\nelse if (outstandingAmount < 0) errors.push('outstanding_amount_negative');\nif (disputed === null) errors.push('disputed_invalid');\nconst due = parseDateOnly(dueDate);\nif (!due) errors.push('due_date_invalid');\nif (!['unpaid', 'paid', 'partially_paid'].includes(paymentStatus)) errors.push('payment_status_invalid');\n\nlet classification = 'invalid';\nlet reminderStage = '';\nlet outputPath = 'invalid_record';\nlet actionReason = errors.join(',');\n\nif (errors.length === 0) {\n  const inconsistentAmount = Math.abs(totalAmount - paidAmount - outstandingAmount) > AMOUNT_TOLERANCE;\n  const paidConflict = paymentStatus === 'paid' && outstandingAmount > 0;\n  const unpaidConflict = paymentStatus === 'unpaid' && (paidAmount > 0 || outstandingAmount === 0);\n  const partialByAmount = paidAmount > 0 && outstandingAmount > 0;\n\n  if (inconsistentAmount) reviewReasons.push('amounts_inconsistent');\n  if (paidConflict || unpaidConflict) reviewReasons.push('payment_state_conflict');\n  if (!email && !phone) reviewReasons.push('customer_contact_missing');\n\n  if (disputed) {\n    classification = 'disputed';\n    reviewReasons.push('invoice_disputed');\n  } else if (paymentStatus === 'partially_paid' || partialByAmount) {\n    classification = 'partially_paid';\n    reviewReasons.push('partial_payment');\n  } else if (reviewReasons.length > 0) {\n    classification = 'requiring_manual_review';\n  } else if (paymentStatus === 'paid' && outstandingAmount === 0) {\n    classification = 'paid';\n    outputPath = 'no_action_required';\n    actionReason = 'invoice_paid';\n  } else {\n    const evaluationDate = EVALUATION_DATE || currentBusinessDate;\n    const evaluation = parseDateOnly(evaluationDate);\n    if (!evaluation) return configurationFailure('evaluation_date_invalid');\n    const daysUntilDue = Math.round((due.getTime() - evaluation.getTime()) / 86400000);\n\n    if (daysUntilDue > 0) {\n      classification = 'upcoming';\n      if (daysUntilDue <= UPCOMING_DAYS_BEFORE_DUE) reminderStage = 'upcoming_' + UPCOMING_DAYS_BEFORE_DUE + '_days';\n      else actionReason = 'outside_upcoming_interval';\n    } else if (daysUntilDue === 0) {\n      classification = 'due';\n      reminderStage = 'due_today';\n    } else {\n      classification = 'overdue';\n      const daysOverdue = Math.abs(daysUntilDue);\n      reminderStage = [...OVERDUE_STAGES].reverse().find(stage => daysOverdue >= stage.minimumDaysOverdue)?.stage ?? '';\n      if (!reminderStage) actionReason = 'before_first_overdue_interval';\n    }\n\n    if (reminderStage) {\n      outputPath = 'ready_for_review';\n      actionReason = 'reminder_stage_eligible';\n    } else outputPath = 'no_action_required';\n  }\n\n  if (reviewReasons.length > 0) {\n    outputPath = 'manual_review';\n    actionReason = [...new Set(reviewReasons)].join(',');\n    reminderStage = '';\n  }\n}\n\nconst draft = reminderStage ? {\n  reminderStage,\n  recipient: { customerId, customerName, email, phone },\n  subject: 'Payment reminder review: invoice ' + invoiceId,\n  title: 'Review ' + reminderStage + ' for ' + invoiceId,\n  messageVariables: { invoiceId, customerName, currency, totalAmount, paidAmount, outstandingAmount, dueDate },\n  invoice: { invoiceId, currency, totalAmount, paidAmount, outstandingAmount, dueDate, paymentStatus, disputed },\n  reviewStatus: 'pending_manual_approval',\n} : null;\n\nreturn { json: { ...normalizedContext, classification, reminderStage, outputPath, actionReason, draft } };"
+        "jsCode": "const UPCOMING_DAYS_BEFORE_DUE = 3;\nconst OVERDUE_STAGES = [\n  { stage: 'overdue_3_days', minimumDaysOverdue: 3 },\n  { stage: 'overdue_7_days', minimumDaysOverdue: 7 },\n  { stage: 'overdue_14_days', minimumDaysOverdue: 14 },\n];\nconst AMOUNT_TOLERANCE = 0.01; // Reconciliation only; never used to decide whether an amount is positive.\nconst configuration = $('Validate Workflow Configuration').first().json;\n\nconst raw = $json ?? {};\nconst fullText = value => String(value ?? '').trim().replace(/\\s+/g, ' ');\nconst limitedText = (value, max) => fullText(value).slice(0, max);\nconst parseDateOnly = value => {\n  if (!/^\\d{4}-\\d{2}-\\d{2}$/.test(value)) return null;\n  const date = new Date(value + 'T00:00:00.000Z');\n  return Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== value ? null : date;\n};\nconst parseTimestamp = value => {\n  const match = /^(\\d{4}-\\d{2}-\\d{2})T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d{1,9})?(?:Z|[+-](?:[01]\\d|2[0-3]):[0-5]\\d)$/.exec(value);\n  if (!match || !parseDateOnly(match[1])) return null;\n  const date = new Date(value);\n  return Number.isNaN(date.getTime()) ? null : date.toISOString();\n};\n\nconst invoiceIdInput = fullText(raw.invoiceId);\nconst invoiceId = invoiceIdInput.length <= 200 ? invoiceIdInput : '';\nconst customerId = limitedText(raw.customer?.id, 200);\nconst customerName = limitedText(raw.customer?.name, 200);\nconst email = limitedText(raw.customer?.email, 320).toLowerCase();\nconst phoneDigits = limitedText(raw.customer?.phone, 50).replace(/\\D/g, '');\nconst subscriberDigits = phoneDigits.startsWith('00') ? phoneDigits.slice(2) : phoneDigits;\nconst phone = /^[1-9]\\d{3,14}$/.test(subscriberDigits) ? '+' + subscriberDigits : '';\nconst currencyInput = fullText(raw.currency).toUpperCase();\nconst currency = currencyInput.length <= 16 ? currencyInput : '';\nconst paymentStatus = limitedText(raw.paymentStatus, 40).toLowerCase().replace(/[ -]+/g, '_');\nconst disputed = typeof raw.disputed === 'boolean' ? raw.disputed : null;\nconst totalAmount = typeof raw.totalAmount === 'number' && Number.isFinite(raw.totalAmount) ? raw.totalAmount : null;\nconst paidAmount = typeof raw.paidAmount === 'number' && Number.isFinite(raw.paidAmount) ? raw.paidAmount : null;\nconst outstandingAmount = typeof raw.outstandingAmount === 'number' && Number.isFinite(raw.outstandingAmount) ? raw.outstandingAmount : null;\nconst dueDate = limitedText(raw.dueDate, 40);\nconst preparedAt = new Date().toISOString();\nconst errors = [];\nconst reviewReasons = [];\n\nconst updatedAtPresent = Object.prototype.hasOwnProperty.call(raw, 'updatedAt');\nlet sourceUpdatedAt = null;\nif (updatedAtPresent) {\n  if (typeof raw.updatedAt !== 'string' || raw.updatedAt.trim() === '') errors.push('updated_at_invalid');\n  else {\n    sourceUpdatedAt = parseTimestamp(raw.updatedAt.trim());\n    if (!sourceUpdatedAt) errors.push('updated_at_invalid');\n  }\n}\n\nconst normalizedContext = {\n  scope: 'invoice',\n  invoiceId,\n  customerId,\n  customerName,\n  email,\n  phone,\n  currency,\n  totalAmount,\n  paidAmount,\n  outstandingAmount,\n  dueDate,\n  paymentStatus,\n  disputed,\n  sourceUpdatedAt,\n  businessTimeZone: configuration.businessTimeZone,\n  preparedAt,\n};\n\nif (!invoiceIdInput) errors.push('invoice_id_missing');\nelse if (invoiceIdInput.length > 200) errors.push('invoice_id_too_long');\nif (!customerId || !customerName) errors.push('customer_identity_missing');\nif (!/^[A-Z]{3}$/.test(currencyInput)) errors.push('currency_invalid');\nif (totalAmount === null) errors.push('total_amount_invalid');\nelse if (totalAmount <= 0) errors.push('total_amount_not_positive');\nif (paidAmount === null) errors.push('paid_amount_invalid');\nelse if (paidAmount < 0) errors.push('paid_amount_negative');\nif (outstandingAmount === null) errors.push('outstanding_amount_invalid');\nelse if (outstandingAmount < 0) errors.push('outstanding_amount_negative');\nif (disputed === null) errors.push('disputed_invalid');\nconst due = parseDateOnly(dueDate);\nif (!due) errors.push('due_date_invalid');\nif (!['unpaid', 'paid', 'partially_paid'].includes(paymentStatus)) errors.push('payment_status_invalid');\n\nlet classification = 'invalid';\nlet reminderStage = '';\nlet outputPath = 'invalid_record';\nlet actionReason = errors.join(',');\n\nif (errors.length === 0) {\n  const inconsistentAmount = Math.abs(totalAmount - paidAmount - outstandingAmount) > AMOUNT_TOLERANCE;\n  const paidConflict = paymentStatus === 'paid' && outstandingAmount > 0;\n  const unpaidConflict = paymentStatus === 'unpaid' && (paidAmount > 0 || outstandingAmount === 0);\n  const partialByAmount = paidAmount > 0 && outstandingAmount > 0;\n\n  if (inconsistentAmount) reviewReasons.push('amounts_inconsistent');\n  if (paidConflict || unpaidConflict) reviewReasons.push('payment_state_conflict');\n  if (!email && !phone) reviewReasons.push('customer_contact_missing');\n\n  if (disputed) {\n    classification = 'disputed';\n    reviewReasons.push('invoice_disputed');\n  } else if (paymentStatus === 'partially_paid' || partialByAmount) {\n    classification = 'partially_paid';\n    reviewReasons.push('partial_payment');\n  } else if (reviewReasons.length > 0) {\n    classification = 'requiring_manual_review';\n  } else if (paymentStatus === 'paid' && outstandingAmount === 0) {\n    classification = 'paid';\n    outputPath = 'no_action_required';\n    actionReason = 'invoice_paid';\n  } else {\n    const evaluation = parseDateOnly(configuration.evaluationDate);\n    const daysUntilDue = Math.round((due.getTime() - evaluation.getTime()) / 86400000);\n\n    if (daysUntilDue > 0) {\n      classification = 'upcoming';\n      if (daysUntilDue <= UPCOMING_DAYS_BEFORE_DUE) reminderStage = 'upcoming_' + UPCOMING_DAYS_BEFORE_DUE + '_days';\n      else actionReason = 'outside_upcoming_interval';\n    } else if (daysUntilDue === 0) {\n      classification = 'due';\n      reminderStage = 'due_today';\n    } else {\n      classification = 'overdue';\n      const daysOverdue = Math.abs(daysUntilDue);\n      reminderStage = [...OVERDUE_STAGES].reverse().find(stage => daysOverdue >= stage.minimumDaysOverdue)?.stage ?? '';\n      if (!reminderStage) actionReason = 'before_first_overdue_interval';\n    }\n\n    if (reminderStage) {\n      outputPath = 'ready_for_review';\n      actionReason = 'reminder_stage_eligible';\n    } else outputPath = 'no_action_required';\n  }\n\n  if (reviewReasons.length > 0) {\n    outputPath = 'manual_review';\n    actionReason = [...new Set(reviewReasons)].join(',');\n    reminderStage = '';\n  }\n}\n\nconst draft = reminderStage ? {\n  reminderStage,\n  recipient: { customerId, customerName, email, phone },\n  subject: 'Payment reminder review: invoice ' + invoiceId,\n  title: 'Review ' + reminderStage + ' for ' + invoiceId,\n  messageVariables: { invoiceId, customerName, currency, totalAmount, paidAmount, outstandingAmount, dueDate },\n  invoice: { invoiceId, currency, totalAmount, paidAmount, outstandingAmount, dueDate, paymentStatus, disputed },\n  reviewStatus: 'pending_manual_approval',\n} : null;\n\nreturn { json: { ...normalizedContext, classification, reminderStage, outputPath, actionReason, draft } };"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -346,7 +346,7 @@
     {
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "const groups = new Map();\nfor (const item of $input.all()) {\n  const value = item.json ?? {};\n  const historyKey = String(value.historyKey ?? '').trim();\n  if (!groups.has(historyKey)) groups.set(historyKey, []);\n  groups.get(historyKey).push(value);\n}\n\nconst output = [];\nfor (const [historyKey, members] of groups) {\n  const invalid = members.some(value => {\n    const draft = value.draft;\n    return !value.invoiceId || !value.reminderStage || !historyKey || !draft || typeof draft !== 'object' || !draft.recipient || !draft.subject || !draft.title || !draft.messageVariables || !draft.invoice || value.outputPath !== 'ready_for_review';\n  });\n  if (invalid) {\n    for (const value of members) output.push({ json: { ...value, outputPath: 'workflow_failure', reviewStatus: 'manual_review', failedOperation: 'output_preparation', actionReason: 'ready_output_invalid', draft: null, deliveryEnabled: false } });\n    continue;\n  }\n  output.push({ json: { ...members[0], historyKey, batchMembers: members, outputPath: 'ready_for_review', reviewStatus: 'pending_manual_approval', deliveryEnabled: false } });\n}\nreturn output;"
+        "jsCode": "const groups = new Map();\nfor (const item of $input.all()) {\n  const value = item.json ?? {};\n  const historyKey = String(value.historyKey ?? '').trim();\n  if (!groups.has(historyKey)) groups.set(historyKey, []);\n  groups.get(historyKey).push(value);\n}\n\nconst output = [];\nfor (const [historyKey, members] of groups) {\n  const invalid = members.some(value => {\n    const draft = value.draft;\n    return !value.invoiceId || !value.reminderStage || !historyKey || !draft || typeof draft !== 'object' || !draft.recipient || !draft.subject || !draft.title || !draft.messageVariables || !draft.invoice || value.outputPath !== 'ready_for_review';\n  });\n  if (invalid) {\n    for (const value of members) output.push({ json: { ...value, scope: 'invoice', outputPath: 'workflow_failure', reviewStatus: 'manual_review', failedOperation: 'output_preparation', actionReason: 'ready_output_invalid', draft: null, deliveryEnabled: false } });\n    continue;\n  }\n  output.push({ json: { ...members[0], historyKey, batchMembers: members, outputPath: 'ready_for_review', reviewStatus: 'pending_manual_approval', deliveryEnabled: false } });\n}\nreturn output;"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -431,7 +431,7 @@
     {
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "const preparedByKey = new Map(\n  $('Prepare Ready Output').all()\n    .map(item => item.json)\n    .filter(value => value.outputPath === 'ready_for_review')\n    .map(value => [value.historyKey, value]),\n);\n\nreturn $input.all().flatMap(item => {\n  const row = item.json ?? {};\n  const key = String(row.invoice_id ?? '').trim() + '::' + String(row.reminder_stage ?? '').trim();\n  const prepared = preparedByKey.get(key);\n  if (!prepared || row.id === undefined || row.id === null) {\n    const members = prepared?.batchMembers ?? [{}];\n    return members.map(value => ({ json: { ...value, outputPath: 'workflow_failure', reviewStatus: 'manual_review', failedOperation: 'history_confirmation', actionReason: 'history_confirmation_failed', draft: null, deliveryEnabled: false } }));\n  }\n  return prepared.batchMembers.map((value, index) => ({\n    json: index === 0\n      ? { ...value, historyKey: key, historyRecordId: row.id, outputPath: 'ready_for_review', reviewStatus: 'pending_manual_approval', deliveryEnabled: false }\n      : { ...value, historyKey: key, historyRecordId: row.id, previousPreparedAt: row.prepared_at ?? prepared.preparedAt, outputPath: 'already_prepared', actionReason: 'duplicate_in_execution', reviewStatus: 'already_prepared', deliveryEnabled: false },\n  }));\n});"
+        "jsCode": "const preparedByKey = new Map(\n  $('Prepare Ready Output').all()\n    .map(item => item.json)\n    .filter(value => value.outputPath === 'ready_for_review')\n    .map(value => [value.historyKey, value]),\n);\n\nreturn $input.all().flatMap(item => {\n  const row = item.json ?? {};\n  const key = String(row.invoice_id ?? '').trim() + '::' + String(row.reminder_stage ?? '').trim();\n  const prepared = preparedByKey.get(key);\n  if (!prepared || row.id === undefined || row.id === null) {\n    const members = prepared?.batchMembers ?? [{}];\n    return members.map(value => ({ json: { ...value, scope: 'invoice', outputPath: 'workflow_failure', reviewStatus: 'manual_review', failedOperation: 'history_confirmation', actionReason: 'history_confirmation_failed', draft: null, deliveryEnabled: false } }));\n  }\n  return prepared.batchMembers.map((value, index) => ({\n    json: index === 0\n      ? { ...value, historyKey: key, historyRecordId: row.id, outputPath: 'ready_for_review', reviewStatus: 'pending_manual_approval', deliveryEnabled: false }\n      : { ...value, historyKey: key, historyRecordId: row.id, previousPreparedAt: row.prepared_at ?? prepared.preparedAt, outputPath: 'already_prepared', actionReason: 'duplicate_in_execution', reviewStatus: 'already_prepared', deliveryEnabled: false },\n  }));\n});"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -445,7 +445,7 @@
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "const value = $json ?? {};\nreturn { json: { invoiceId: String(value.invoiceId ?? ''), reminderStage: String(value.reminderStage ?? ''), classification: value.classification ?? 'requiring_manual_review', outputPath: 'workflow_failure', reviewStatus: 'manual_review', failedOperation: 'history_table_create', actionReason: 'history_table_create_failed', draft: null, deliveryEnabled: false } };"
+        "jsCode": "return { json: { scope: 'workflow', outputPath: 'workflow_failure', reviewStatus: 'manual_review', failedOperation: 'history_table_create', actionReason: 'history_table_create_failed', draft: null, deliveryEnabled: false } };"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -459,7 +459,7 @@
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "const value = $json ?? {};\nreturn { json: { invoiceId: String(value.invoiceId ?? ''), reminderStage: String(value.reminderStage ?? ''), classification: value.classification ?? 'requiring_manual_review', outputPath: 'workflow_failure', reviewStatus: 'manual_review', failedOperation: 'history_load', actionReason: 'history_load_failed', draft: null, deliveryEnabled: false } };"
+        "jsCode": "return { json: { scope: 'workflow', outputPath: 'workflow_failure', reviewStatus: 'manual_review', failedOperation: 'history_load', actionReason: 'history_load_failed', draft: null, deliveryEnabled: false } };"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -473,7 +473,7 @@
     {
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "const preparedByKey = new Map(\n  $('Prepare Ready Output').all()\n    .map(item => item.json)\n    .filter(value => value.outputPath === 'ready_for_review')\n    .map(value => [value.historyKey, value]),\n);\nconst handled = new Set();\nconst output = [];\nfor (const item of $input.all()) {\n  const value = item.json ?? {};\n  const key = String(value.historyKey ?? '').trim()\n    || (String(value.invoiceId ?? value.invoice_id ?? '').trim() + '::' + String(value.reminderStage ?? value.reminder_stage ?? '').trim());\n  if (handled.has(key)) continue;\n  handled.add(key);\n  const prepared = preparedByKey.get(key);\n  const members = prepared?.batchMembers ?? [value];\n  for (const member of members) output.push({ json: { ...member, outputPath: 'workflow_failure', reviewStatus: 'manual_review', failedOperation: 'history_insert', actionReason: 'history_insert_failed', draft: null, deliveryEnabled: false } });\n}\nreturn output;"
+        "jsCode": "const preparedByKey = new Map(\n  $('Prepare Ready Output').all()\n    .map(item => item.json)\n    .filter(value => value.outputPath === 'ready_for_review')\n    .map(value => [value.historyKey, value]),\n);\nconst handled = new Set();\nconst output = [];\nfor (const item of $input.all()) {\n  const value = item.json ?? {};\n  const key = String(value.historyKey ?? '').trim()\n    || (String(value.invoiceId ?? value.invoice_id ?? '').trim() + '::' + String(value.reminderStage ?? value.reminder_stage ?? '').trim());\n  if (handled.has(key)) continue;\n  handled.add(key);\n  const prepared = preparedByKey.get(key);\n  const members = prepared?.batchMembers ?? [value];\n  for (const member of members) output.push({ json: { ...member, scope: 'invoice', outputPath: 'workflow_failure', reviewStatus: 'manual_review', failedOperation: 'history_insert', actionReason: 'history_insert_failed', draft: null, deliveryEnabled: false } });\n}\nreturn output;"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -577,6 +577,20 @@
     },
     {
       "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const BUSINESS_TIME_ZONE = 'UTC';\nconst EVALUATION_DATE = ''; // Optional YYYY-MM-DD test override; blank uses the configured business time zone.\n\nconst parseDateOnly = value => {\n  if (!/^\\d{4}-\\d{2}-\\d{2}$/.test(value)) return null;\n  const date = new Date(value + 'T00:00:00.000Z');\n  return Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== value ? null : date;\n};\nconst businessDate = timeZone => {\n  const parts = new Intl.DateTimeFormat('en-US', {\n    timeZone,\n    year: 'numeric',\n    month: '2-digit',\n    day: '2-digit',\n  }).formatToParts(new Date());\n  const part = type => parts.find(value => value.type === type)?.value;\n  return part('year') + '-' + part('month') + '-' + part('day');\n};\nconst failure = actionReason => [{ json: {\n  scope: 'workflow',\n  configurationValid: false,\n  outputPath: 'workflow_failure',\n  reviewStatus: 'manual_review',\n  failedOperation: 'business_date_configuration',\n  actionReason,\n  draft: null,\n  deliveryEnabled: false,\n} }];\n\nlet currentBusinessDate;\ntry {\n  currentBusinessDate = businessDate(BUSINESS_TIME_ZONE);\n} catch {\n  return failure('business_time_zone_invalid');\n}\n\nconst configuredDate = String(EVALUATION_DATE ?? '').trim();\nif (configuredDate && !parseDateOnly(configuredDate)) return failure('evaluation_date_invalid');\n\nreturn [{ json: {\n  scope: 'workflow',\n  configurationValid: true,\n  businessTimeZone: BUSINESS_TIME_ZONE,\n  evaluationDate: configuredDate || currentBusinessDate,\n} }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -900,
+        180
+      ],
+      "id": "14c6796b-f1de-4c43-986f-837829668854",
+      "name": "Validate Workflow Configuration"
+    },
+    {
+      "parameters": {
         "conditions": {
           "options": {
             "caseSensitive": true,
@@ -585,12 +599,13 @@
           },
           "conditions": [
             {
-              "id": "ef107914-04ec-4de4-aafa-4a0f66f267b1",
-              "leftValue": "={{ $json.outputPath }}",
-              "rightValue": "workflow_failure",
+              "id": "97abced9-465e-4c26-8276-e9baaf85dd03",
+              "leftValue": "={{ $json.configurationValid }}",
+              "rightValue": true,
               "operator": {
-                "type": "string",
-                "operation": "equals"
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
               }
             }
           ],
@@ -601,11 +616,11 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.3,
       "position": [
-        60,
-        320
+        -680,
+        180
       ],
-      "id": "0f8d75dc-7a72-46dc-b81f-514ac23b17b6",
-      "name": "Workflow Failure?"
+      "id": "31c78382-26e0-4a44-b662-c87e54c7cd58",
+      "name": "Configuration Valid?"
     }
   ],
   "connections": {
@@ -613,7 +628,7 @@
       "main": [
         [
           {
-            "node": "Create or Reuse Reminder History",
+            "node": "Validate Workflow Configuration",
             "type": "main",
             "index": 0
           }
@@ -671,7 +686,7 @@
       "main": [
         [
           {
-            "node": "Workflow Failure?",
+            "node": "Group Batch Reminder Keys",
             "type": "main",
             "index": 0
           }
@@ -841,29 +856,40 @@
         ]
       ]
     },
-    "Workflow Failure?": {
+    "Group Batch Reminder Keys": {
       "main": [
         [
           {
-            "node": "Workflow Failure",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "Group Batch Reminder Keys",
+            "node": "Check Reminder History",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Group Batch Reminder Keys": {
+    "Validate Workflow Configuration": {
       "main": [
         [
           {
-            "node": "Check Reminder History",
+            "node": "Configuration Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Configuration Valid?": {
+      "main": [
+        [
+          {
+            "node": "Create or Reuse Reminder History",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Workflow Failure",
             "type": "main",
             "index": 0
           }
